@@ -1,11 +1,12 @@
+pub mod telegraph;
+
 pub trait Parser {
     fn domain(&self) -> &'static str;
-    fn parse(&self, raw: &str) -> Result<ParseResult, Error>;
+    fn parse(&self, raw: &str) -> anyhow::Result<ParseResult>;
 }
 
+#[derive(Debug)]
 pub enum ParseResult {
     Markdown,
-    Images,
+    Images { title: String, urls: Vec<String> },
 }
-
-pub struct Error;
