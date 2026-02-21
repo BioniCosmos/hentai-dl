@@ -1,3 +1,4 @@
+pub mod houhuayuan;
 pub mod telegraph;
 
 pub trait Parser {
@@ -7,6 +8,6 @@ pub trait Parser {
 
 #[derive(Debug)]
 pub enum ParseResult {
-    Markdown,
+    Markdown { title: String, body: String },
     Images { title: String, urls: Vec<String> },
 }
