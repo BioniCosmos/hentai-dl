@@ -8,13 +8,14 @@ use std::{
 
 use anyhow::{Context, Error, anyhow, bail};
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use tokio::{fs, task::JoinSet};
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::parser::{ParseResult, Registry};
 
-pub struct Download {
+pub struct DownloadService {
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     parser_registry: Arc<Registry>,
 }
@@ -24,25 +25,28 @@ struct Task {
     result: Option<anyhow::Result<String>>,
 }
 
-#[derive(Clone)]
+// TODO: use enum
+// TODO: canonicalize names
+#[derive(Clone, Deserialize)]
 pub struct TaskCreationParams {
     pub param_type: String,
     pub url: String,
     pub raw: String,
 }
 
+#[derive(Serialize)]
 pub struct TaskCreationResult {
     pub id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct TaskQueryResult {
     pub id: String,
     pub status: &'static str,
     pub message: String,
 }
 
-impl Download {
+impl DownloadService {
     pub fn new(parser_registry: Arc<Registry>) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -50,7 +54,7 @@ impl Download {
         }
     }
 
-    pub fn create_task(&mut self, params: &TaskCreationParams) -> TaskCreationResult {
+    pub fn create_task(&self, params: &TaskCreationParams) -> TaskCreationResult {
         let id = Uuid::new_v4().to_string();
         self.tasks.write().unwrap().insert(
             id.clone(),
@@ -147,6 +151,7 @@ impl Download {
                         Path::new(&url)
                             .extension()
                             .map(|ext| format!(".{}", ext.display()))
+                            // TODO: improve the error handling
                             .unwrap_or_default()
                     ),
                     reqwest::get(&url).await?.bytes().await?,
