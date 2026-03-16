@@ -10,6 +10,7 @@ impl Parser for Telegraph {
         "telegra.ph"
     }
 
+    // TODO: convert relative URLs to absolute
     fn parse(&self, raw: &str) -> anyhow::Result<ParseResult> {
         let doc = Html::parse_document(raw);
         let title = doc

@@ -2,18 +2,21 @@ use std::{
     collections::HashMap,
     fs::File,
     io::Write,
-    path::Path,
     sync::{Arc, RwLock},
 };
 
-use anyhow::{Context, Error, anyhow, bail};
-use reqwest::Url;
+use anyhow::{Context, Error, anyhow};
+use reqwest::{Url, header};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, task::JoinSet};
+use tracing::instrument;
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
-use crate::parser::{ParseResult, Registry};
+use crate::{
+    parser::{ParseResult, Registry},
+    utils,
+};
 
 pub struct DownloadService {
     tasks: Arc<RwLock<HashMap<String, Task>>>,
@@ -25,13 +28,11 @@ struct Task {
     result: Option<anyhow::Result<String>>,
 }
 
-// TODO: use enum
-// TODO: canonicalize names
 #[derive(Clone, Deserialize)]
-pub struct TaskCreationParams {
-    pub param_type: String,
-    pub url: String,
-    pub raw: String,
+#[serde(tag = "paramType", rename_all = "camelCase")]
+pub enum TaskCreationParams {
+    Url { url: String },
+    Raw { url: String, raw: String },
 }
 
 #[derive(Serialize)]
@@ -71,12 +72,16 @@ impl DownloadService {
             let tasks = Arc::clone(&self.tasks);
 
             tokio::spawn(async move {
+                let result = Self::run_task(parser_registry, params).await;
+                if let Err(e) = &result {
+                    tracing::error!(task_id = %id, error = ?e, "task failed");
+                }
                 tasks
                     .write()
                     .unwrap()
                     .get_mut(&id)
                     .expect("unexpected task miss")
-                    .result = Some(Self::run_task(parser_registry, params).await);
+                    .result = Some(result);
             });
         }
 
@@ -88,7 +93,7 @@ impl DownloadService {
             let (status, message) = match task.result.as_ref() {
                 Some(result) => match result {
                     Ok(path) => ("done", path.clone()),
-                    Err(e) => ("error", e.to_string()),
+                    Err(e) => ("error", format!("{e:#}")),
                 },
                 None => ("pending", "".to_owned()),
             };
@@ -106,55 +111,47 @@ impl DownloadService {
         parser_registry: Arc<Registry>,
         params: TaskCreationParams,
     ) -> anyhow::Result<String> {
+        let (url, raw) = match params {
+            TaskCreationParams::Url { ref url } => (url, reqwest::get(url).await?.text().await?),
+            TaskCreationParams::Raw { ref url, raw } => (url, raw),
+        };
         match parser_registry
-            .get(Url::parse(&params.url)?.host_str().context("invalid url")?)
+            .get(Url::parse(url)?.host_str().context("invalid url")?)
             .context("unsupported origin")?
-            .parse(&match params.param_type.as_str() {
-                "url" => reqwest::get(&params.url).await?.text().await?,
-                "raw" => params.raw.clone(),
-                _ => bail!("invalid param type"),
-            })? {
+            .parse(&raw)?
+        {
             ParseResult::Markdown { title, body } => {
                 let path = format!("{title}.md");
-                fs::write(format!("{title}.md"), body).await?;
+                fs::write(&path, body).await?;
                 Ok(path)
             }
             result @ ParseResult::Images { .. } => Self::save_images(result).await,
         }
     }
 
-    // TODO: get the extension by `Content-Type`
+    #[instrument(level = "trace")]
     async fn save_images(result: ParseResult) -> anyhow::Result<String> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
         };
 
-        let width = {
-            let mut n = urls.len();
-            if n == 0 {
-                1
-            } else {
-                let mut count = 0;
-                while n > 0 {
-                    count += 1;
-                    n /= 10;
-                }
-                count
-            }
-        };
+        let width = (urls.len().checked_ilog10().unwrap_or_default() + 1) as usize;
         let mut tasks = JoinSet::new();
         for (i, url) in urls.into_iter().enumerate() {
             tasks.spawn(async move {
+                let response = reqwest::get(&url).await?;
+                let content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .context("`Content-Type` header not found")
+                    .and_then(|media_type| media_type.to_str().map_err(Error::new))?;
                 Ok((
                     format!(
-                        "{i:0>width$}{}",
-                        Path::new(&url)
-                            .extension()
-                            .map(|ext| format!(".{}", ext.display()))
-                            // TODO: improve the error handling
-                            .unwrap_or_default()
+                        "{i:0>width$}.{}",
+                        utils::media_type_to_ext(content_type)
+                            .context(format!("unsupported `Content-Type`: {content_type}"))?
                     ),
-                    reqwest::get(&url).await?.bytes().await?,
+                    response.bytes().await?,
                 ))
             });
         }

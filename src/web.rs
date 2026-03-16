@@ -22,7 +22,7 @@ pub async fn start() {
         .with(fmt::layer().pretty())
         .with(
             EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new("trace"))
+                .or_else(|_| EnvFilter::try_new("hentai_dl=trace,tower_http=trace,axum=trace"))
                 .expect("failed to initialize the filter layer"),
         )
         .init();
