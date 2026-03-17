@@ -6,7 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Error, anyhow};
-use reqwest::{Url, header};
+use http::header;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::{fs, task::JoinSet};
 use tracing::instrument;
@@ -72,7 +73,7 @@ impl DownloadService {
             let tasks = Arc::clone(&self.tasks);
 
             tokio::spawn(async move {
-                let result = Self::run_task(parser_registry, params).await;
+                let result = Self::run_task(parser_registry, &id, params).await;
                 if let Err(e) = &result {
                     tracing::error!(task_id = %id, error = ?e, "task failed");
                 }
@@ -92,7 +93,7 @@ impl DownloadService {
         self.tasks.read().unwrap().get(id).map(|task| {
             let (status, message) = match task.result.as_ref() {
                 Some(result) => match result {
-                    Ok(path) => ("done", path.clone()),
+                    Ok(file_name) => ("done", file_name.clone()),
                     Err(e) => ("error", format!("{e:#}")),
                 },
                 None => ("pending", "".to_owned()),
@@ -105,10 +106,9 @@ impl DownloadService {
         })
     }
 
-    pub fn download_file(&self) {}
-
     async fn run_task(
         parser_registry: Arc<Registry>,
+        id: &str,
         params: TaskCreationParams,
     ) -> anyhow::Result<String> {
         let (url, raw) = match params {
@@ -121,16 +121,15 @@ impl DownloadService {
             .parse(&raw)?
         {
             ParseResult::Markdown { title, body } => {
-                let path = format!("{title}.md");
-                fs::write(&path, body).await?;
-                Ok(path)
+                fs::write(format!("{id}.md"), body).await?;
+                Ok(format!("{title}.md"))
             }
-            result @ ParseResult::Images { .. } => Self::save_images(result).await,
+            result @ ParseResult::Images { .. } => Self::save_images(id, result).await,
         }
     }
 
     #[instrument(level = "trace")]
-    async fn save_images(result: ParseResult) -> anyhow::Result<String> {
+    async fn save_images(id: &str, result: ParseResult) -> anyhow::Result<String> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
         };
@@ -163,8 +162,7 @@ impl DownloadService {
             .collect::<Result<Vec<_>, Error>>()?;
         results.sort();
 
-        let path = format!("{title}.zip");
-        let mut writer = ZipWriter::new(File::create(&path)?);
+        let mut writer = ZipWriter::new(File::create(format!("{id}.zip"))?);
         let options = SimpleFileOptions::default();
         for (name, res) in results {
             writer.start_file(format!("{title}/{name}"), options)?;
@@ -172,6 +170,6 @@ impl DownloadService {
         }
         writer.finish()?;
 
-        Ok(path)
+        Ok(title + ".zip")
     }
 }

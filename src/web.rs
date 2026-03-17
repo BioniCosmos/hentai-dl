@@ -1,14 +1,16 @@
-use std::sync::Arc;
+use std::{path, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    response::Html,
+    extract::{self, Request, State},
+    response::{Html, IntoResponse},
     routing,
 };
-use reqwest::StatusCode;
+use http::{StatusCode, header::CONTENT_DISPOSITION};
+use percent_encoding::NON_ALPHANUMERIC;
 use tokio::net::TcpListener;
-use tower_http::trace::TraceLayer;
+use tower::ServiceExt;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -44,11 +46,57 @@ pub async fn start() {
         .route(
             "/api/download/{id}",
             routing::get(
-                async |State(download_svc): State<Arc<DownloadService>>, Path(id): Path<String>| {
+                async |State(download_svc): State<Arc<DownloadService>>,
+                       extract::Path(id): extract::Path<String>| {
                     download_svc
                         .query_task(&id)
                         .map(Json)
                         .ok_or(StatusCode::NOT_FOUND)
+                },
+            ),
+        )
+        .route(
+            "/api/download/file/{id}",
+            routing::get(
+                async |State(download_svc): State<Arc<DownloadService>>,
+                       extract::Path(id): extract::Path<String>,
+                       mut req: Request| {
+                    // TODO: check task status
+                    let Some(task) = download_svc.query_task(&id) else {
+                        return StatusCode::NOT_FOUND.into_response();
+                    };
+
+                    *req.uri_mut() = format!(
+                        "{}.{}",
+                        &req.uri().path()["/api/download/file".len()..],
+                        path::Path::new(&task.message)
+                            .extension()
+                            .expect("unexpected invalid file name")
+                            .display()
+                    )
+                    .parse()
+                    .expect("unexpected invalid path");
+
+                    let srv = ServeDir::new(".");
+                    let res = srv.oneshot(req).await.unwrap();
+                    if res.status() != StatusCode::OK {
+                        res.into_response()
+                    } else {
+                        (
+                            [(
+                                CONTENT_DISPOSITION,
+                                format!(
+                                    "attachment; filename*=UTF-8''{}",
+                                    percent_encoding::utf8_percent_encode(
+                                        &task.message,
+                                        NON_ALPHANUMERIC
+                                    )
+                                ),
+                            )],
+                            res,
+                        )
+                            .into_response()
+                    }
                 },
             ),
         )
