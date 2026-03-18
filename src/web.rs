@@ -33,7 +33,7 @@ pub async fn start() {
     let download_svc = Arc::new(DownloadService::new(parser_registry));
 
     let app = Router::new()
-        .route("/", routing::get(Html(include_bytes!("../index.html"))))
+        .route("/", routing::get(Html(include_bytes!("../web/index.html"))))
         .route(
             "/api/download",
             routing::post(

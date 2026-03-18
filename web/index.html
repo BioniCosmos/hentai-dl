@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Hentai Downloader</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.pink.min.css"
+    />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Hentai Downloader</h1>
+      <fieldset>
+        <legend>Upload methods:</legend>
+        <input type="radio" name="method" id="url" checked />
+        <label for="url">URL</label>
+        <input type="radio" name="method" id="file" />
+        <label for="file">File</label>
+      </fieldset>
+    </main>
+    <script type="module">
+      import ky from 'https://esm.sh/ky'
+
+      const tabSwitcher = document.querySelector('fieldset')
+      let card = null
+      let messageDisplay = null
+
+      function switchTab(method) {
+        if (card !== null) {
+          card.remove()
+        }
+        card = document.createElement('article')
+        const form = document.createElement('form')
+        if (method === 'url') {
+          form.innerHTML = `
+              <fieldset role="group">
+                <input name="url" placeholder="URL" required />
+                <button>Download</button>
+              </fieldset>
+            `
+        } else if (method === 'file') {
+          form.innerHTML = `
+              <select name="url" required>
+                <option>houhuayuan.vip</option>
+                <option>telegra.ph</option>
+              </select>
+              <fieldset role="group">
+                <input type="file" name="file" required />
+                <button>Download</button>
+              </fieldset>
+            `
+        } else {
+          throw Error('unreachable')
+        }
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault()
+          if (messageDisplay !== null) {
+            messageDisplay.remove()
+          }
+          const formData = new FormData(e.target)
+          let json
+          if (method === 'url') {
+            json = { paramType: 'url', url: formData.get('url') }
+          } else if (method === 'file') {
+            json = {
+              paramType: 'raw',
+              url: `https://${formData.get('url')}`,
+              raw: await formData.get('file').text(),
+            }
+          } else {
+            throw Error('unreachable')
+          }
+          const { id } = await ky.post('/api/download', { json }).json()
+          const submitButton = document.querySelector('button')
+          submitButton.ariaBusy = 'true'
+          submitButton.innerHTML = 'Downloading…'
+          const polling = setInterval(async () => {
+            const { status, message } = await ky(`/api/download/${id}`).json()
+            if (status === 'pending') {
+              return
+            }
+            if (status === 'error') {
+              alert(message)
+            } else if (status === 'done') {
+              messageDisplay = document.createElement('p')
+              messageDisplay.innerHTML = `Done: <a href="/api/download/file/${id}">${message}</a>`
+              card.appendChild(messageDisplay)
+            }
+            clearInterval(polling)
+            submitButton.ariaBusy = 'false'
+            submitButton.innerHTML = 'Download'
+          }, 1000)
+        })
+        card.appendChild(form)
+        document.querySelector('main').appendChild(card)
+      }
+
+      tabSwitcher
+        .querySelectorAll('input')
+        .forEach((element) =>
+          element.addEventListener('click', (e) => switchTab(e.target.id)),
+        )
+
+      switchTab('url')
+    </script>
+  </body>
+</html>
