@@ -1,7 +1,9 @@
+import Combine
 import SwiftUI
+import WebKit
 
 struct ContentView: View {
-    enum URL: String, CaseIterable, Identifiable {
+    enum Site: String, CaseIterable, Identifiable {
         case houhuayuan = "houhuayuan.vip"
         case telegraph = "telegra.ph"
 
@@ -10,20 +12,22 @@ struct ContentView: View {
 
     private static let defaultImportErr = "failed to import file"
 
-    @State private var url = ""
+    @State private var err = ""
 
-    @State private var site = URL.houhuayuan
+    @State private var rawURL = "https://moecm.com"
+    @State private var showWebView = false
+
+    @State private var site = Site.houhuayuan
     @State private var open = false
-    @State private var importErr = ""
 
-    private var importFailed: Binding<Bool> {
-        Binding(get: { !importErr.isEmpty }, set: { if !$0 { importErr = "" } })
+    private var failed: Binding<Bool> {
+        Binding(get: { !err.isEmpty }, set: { if !$0 { err = "" } })
     }
 
-    private var DownloadButton: some View {
-        Button {
-            print(url)
-        } label: {
+    private var url: URL? { URL(string: rawURL) }
+
+    private func DownloadButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             Text("Download").frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
@@ -36,16 +40,27 @@ struct ContentView: View {
     var body: some View {
         TabView {
             Tab("URL", systemImage: "network") {
-                Form {
-                    Section { TextField("URL", text: $url) }
-                    DownloadButton
+                NavigationStack {
+                    Form {
+                        Section { TextField("URL", text: $rawURL) }
+                        DownloadButton {
+                            if url != nil { showWebView = true } else { err = "invalid URL" }
+                        }
+                    }.navigationDestination(isPresented: $showWebView) {
+                        if let url = url {
+                            WebView(url: url) {
+                                print($0.prefix(100))
+                                showWebView = false
+                            }
+                        }
+                    }
                 }
             }
             Tab("File", systemImage: "folder") {
                 Form {
                     Section {
                         Picker("URL", selection: $site) {
-                            ForEach(URL.allCases) { url in Text(url.rawValue) }
+                            ForEach(Site.allCases) { url in Text(url.rawValue) }
                         }
                         Button("Pick file") { open = true }.fileImporter(
                             isPresented: $open, allowedContentTypes: [.html]
@@ -53,10 +68,11 @@ struct ContentView: View {
                             switch result {
                             case .success(let url):
                                 guard url.startAccessingSecurityScopedResource() else {
-                                    importErr = Self.defaultImportErr
+                                    err = Self.defaultImportErr
                                     return
                                 }
                                 defer { url.stopAccessingSecurityScopedResource() }
+
                                 do {
                                     let content = try String(contentsOf: url, encoding: .utf8)
                                     print(
@@ -65,19 +81,48 @@ struct ContentView: View {
                                         contentPrefix=\(content.prefix(100))
                                         """
                                     )
-                                } catch { importErr = error.localizedDescription }
-                            case .failure(let err): importErr = err.localizedDescription
+                                } catch { err = error.localizedDescription }
+
+                            case .failure(let err): self.err = err.localizedDescription
                             }
                         }
                     }
-                    DownloadButton
+                    DownloadButton {}
                 }
             }
-        }.alert("Error", isPresented: importFailed) {
+        }.alert("Error", isPresented: failed) {
         } message: {
-            Text(importErr)
+            Text(err)
         }
     }
+}
+
+private struct WebView: UIViewRepresentable {
+    typealias UIViewType = WKWebView
+
+    let url: URL
+    let onComplete: (String) -> Void
+
+    func makeUIView(context: Context) -> UIViewType {
+        let webView = WKWebView()
+        webView.load(URLRequest(url: self.url))
+        context.coordinator.crawler =
+            webView
+            .publisher(for: \.title)
+            .first { $0?.contains("蔷薇后花园") ?? false }
+            .sink { _ in
+                webView.evaluateJavaScript("document.documentElement.outerHTML") { value, _ in
+                    self.onComplete(value as! String)
+                }
+            }
+        return webView
+    }
+
+    func updateUIView(_ uiView: UIViewType, context: Context) {}
+
+    class Coordinator { var crawler: Cancellable? }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 }
 
 #Preview {
