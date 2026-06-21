@@ -26,15 +26,18 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import kotlinx.coroutines.CompletableDeferred
@@ -93,7 +96,7 @@ private fun URLTab(
     scope: CoroutineScope,
     viewModel: MainViewModel = viewModel(),
 ) {
-    var url by remember { mutableStateOf("") }
+    var url by rememberSaveable { mutableStateOf("") }
 
     TextField(
         url,
@@ -102,23 +105,39 @@ private fun URLTab(
         label = { Text("URL") },
     )
     Button({
-        viewModel.download(
-            url,
-            { scope.launch { snackbarHostState.showSnackbar("Done. Saved to $it") } },
-            { scope.launch { snackbarHostState.showSnackbar("Error: ${it.message}") } },
-        )
+        if (url.contains(URL.Houhuayuan.url)) {
+            navController.navigate(AuthPage(url))
+        } else {
+            viewModel.download(
+                API.TaskCreationParams.Url(url = url),
+                { scope.launch { snackbarHostState.showSnackbar("Done. Saved to $it") } },
+                { scope.launch { snackbarHostState.showSnackbar("Error: ${it.message}") } },
+            )
+        }
     }, Modifier.fillMaxWidth(), !viewModel.pending) { Text("Download") }
+
+    val doc = navController.currentBackStackEntry?.savedStateHandle?.getStateFlow("doc", "")
+        ?.collectAsStateWithLifecycle()
+    LaunchedEffect(doc?.value) {
+        val doc = doc?.value
+        if (!doc.isNullOrEmpty()) {
+            viewModel.download(
+                API.TaskCreationParams.Raw(url = url, raw = doc),
+                { scope.launch { snackbarHostState.showSnackbar("Done. Saved to $it") } },
+                { scope.launch { snackbarHostState.showSnackbar("Error: ${it.message}") } },
+            )
+        }
+    }
 }
 
 @Composable
-private fun FileTab(snackbarHostState: SnackbarHostState, scope: CoroutineScope) {
+private fun FileTab(snackbarHostState: SnackbarHostState, scope: CoroutineScope, viewModel: MainViewModel = viewModel()) {
     var open by remember { mutableStateOf(false) }
     var url by remember { mutableStateOf(URL.Houhuayuan) }
     var file by remember { mutableStateOf<Pair<String, String>?>(null) }
     val pickFile = rememberFilePicker()
 
-    // CRAZY…
-    @Suppress("AssignedValueIsNeverRead") ExposedDropdownMenuBox(open, { open = it }) {
+    ExposedDropdownMenuBox(open, { open = it }) {
         OutlinedTextField(
             url.url,
             {},
@@ -156,7 +175,13 @@ private fun FileTab(snackbarHostState: SnackbarHostState, scope: CoroutineScope)
         }) { Text("Pick file") }
         Text(file?.first ?: "")
     }
-    Button({}, Modifier.fillMaxWidth()) { Text("Download") }
+    Button({
+        viewModel.download(
+            API.TaskCreationParams.Raw(url = "https://${url.url}", raw = file?.second ?: ""),
+            { scope.launch { snackbarHostState.showSnackbar("Done. Saved to $it") } },
+            { scope.launch { snackbarHostState.showSnackbar("Error: ${it.message}") } },
+        )
+    }, Modifier.fillMaxWidth()) { Text("Download") }
 }
 
 private enum class URL(val url: String) { Houhuayuan("houhuayuan.vip"), Telegraph("telegra.ph") }

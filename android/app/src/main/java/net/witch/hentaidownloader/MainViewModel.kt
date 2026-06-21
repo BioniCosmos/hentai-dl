@@ -27,13 +27,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     fun download(
-        url: String,
+        params: API.TaskCreationParams,
         @UiThread onSuccess: (String) -> Unit,
         @UiThread onFailure: (Exception) -> Unit,
     ) {
         this.pending = true
         this.viewModelScope.launch(Dispatchers.IO) {
-            val (id) = api.createTask(API.TaskCreationParams.Url(url = url))
+            val (id) = api.createTask(params)
 
             suspend fun fail(e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -95,6 +95,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 null,
                             )
                         } catch (e: Exception) {
+                            // TODO: why should catch CancellationException?
                             if (e is CancellationException) {
                                 throw e
                             }
