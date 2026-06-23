@@ -1,6 +1,6 @@
 import Foundation
 
-struct API {
+class API {
     private let baseURL = Bundle.main.infoDictionary!["BASE_URL"] as! String
 
     enum TaskCreationParams: Codable {
