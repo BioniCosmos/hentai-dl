@@ -3,23 +3,12 @@ import SwiftUI
 import WebKit
 
 struct ContentView: View {
-    private static let defaultImportErr = "failed to import file"
-
     @State private var err = ""
-
-    @State private var rawURL = ""
-    @State private var showWebView = false
-
-    @State private var site = Site.houhuayuan
-    @State private var open = false
-
     @State private var downloadViewModel = DownloadViewModel()
 
     private var failed: Binding<Bool> {
         Binding(get: { !err.isEmpty }, set: { if !$0 { err = "" } })
     }
-
-    private var url: URL? { URL(string: rawURL) }
 
     var body: some View {
         TabView {
@@ -27,38 +16,7 @@ struct ContentView: View {
                 URLTab(downloadViewModel: downloadViewModel, err: $err)
             }
             Tab("File", systemImage: "folder") {
-                Form {
-                    Section {
-                        Picker("URL", selection: $site) {
-                            ForEach(Site.allCases) { url in Text(url.rawValue) }
-                        }
-                        Button("Pick file") { open = true }.fileImporter(
-                            isPresented: $open, allowedContentTypes: [.html]
-                        ) { result in
-                            switch result {
-                            case .success(let url):
-                                guard url.startAccessingSecurityScopedResource() else {
-                                    err = Self.defaultImportErr
-                                    return
-                                }
-                                defer { url.stopAccessingSecurityScopedResource() }
-
-                                do {
-                                    let content = try String(contentsOf: url, encoding: .utf8)
-                                    print(
-                                        """
-                                        name=\(url.lastPathComponent)
-                                        contentPrefix=\(content.prefix(100))
-                                        """
-                                    )
-                                } catch { err = error.localizedDescription }
-
-                            case .failure(let err): self.err = err.localizedDescription
-                            }
-                        }
-                    }
-                    DownloadButton {}
-                }
+                FileTab(downloadViewModel: downloadViewModel, err: $err)
             }
         }.alert("Error", isPresented: failed) {
         } message: {
@@ -119,6 +77,60 @@ private struct URLTab: View {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+private struct FileTab: View {
+    let downloadViewModel: DownloadViewModel
+    @Binding var err: String
+
+    @State private var site = Site.houhuayuan
+    @State private var open = false
+    @State private var name = ""
+    @State private var content = ""
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("URL", selection: $site) {
+                    ForEach(Site.allCases) { url in Text(url.rawValue) }
+                }
+                Button("Pick file") { open = true }.fileImporter(
+                    isPresented: $open, allowedContentTypes: [.html]
+                ) { result in
+                    switch result {
+                    case .success(let url):
+                        guard url.startAccessingSecurityScopedResource() else {
+                            err = "failed to import file"
+                            return
+                        }
+                        defer { url.stopAccessingSecurityScopedResource() }
+
+                        do {
+                            name = url.lastPathComponent
+                            content = try String(contentsOf: url, encoding: .utf8)
+                        } catch { err = error.localizedDescription }
+                    case .failure(let err): self.err = err.localizedDescription
+                    }
+                }
+                if !name.isEmpty {
+                    Label(name, systemImage: "doc.text")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            DownloadButton(downloadViewModel.pending) {
+                if content.isEmpty {
+                    err = "import a file first"
+                    return
+                }
+
+                downloadViewModel.download(
+                    with: .raw(url: "https://\(site.rawValue)", raw: content),
+                ) { err = $0.errorDescription }
             }
         }
     }
