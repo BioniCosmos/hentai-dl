@@ -3,32 +3,51 @@ import SwiftUI
 import WebKit
 
 struct ContentView: View {
-    @State private var err = ""
     @State private var downloadViewModel = DownloadViewModel()
+    @State private var alertTitle = ""
+    @State private var alertMessage = ""
 
-    private var failed: Binding<Bool> {
-        Binding(get: { !err.isEmpty }, set: { if !$0 { err = "" } })
+    private var showAlert: Binding<Bool> {
+        Binding(
+            get: { !alertTitle.isEmpty },
+            set: {
+                if !$0 {
+                    alertTitle = ""
+                    alertMessage = ""
+                }
+            })
+    }
+
+    private var err: Binding<String> {
+        Binding(
+            get: { alertMessage },
+            set: {
+                alertTitle = "Error"
+                alertMessage = $0
+            })
     }
 
     var body: some View {
         TabView {
             Tab("URL", systemImage: "network") {
-                URLTab(downloadViewModel: downloadViewModel, err: $err)
+                URLTab(downloadViewModel: downloadViewModel, err: err)
             }
             Tab("File", systemImage: "folder") {
-                FileTab(downloadViewModel: downloadViewModel, err: $err)
+                FileTab(downloadViewModel: downloadViewModel, err: err)
             }
-        }.alert("Error", isPresented: failed) {
+        }.alert(alertTitle, isPresented: showAlert) {
         } message: {
-            Text(err)
+            Text(alertMessage)
         }.fileExporter(
             isPresented: $downloadViewModel.exporting,
             document: downloadViewModel.document,
             defaultFilename: downloadViewModel.name,
         ) {
             switch $0 {
-            case .success(let url): print(url)
-            case .failure(let err): self.err = err.localizedDescription
+            case .success:
+                alertTitle = "Success"
+                alertMessage = "File saved successfully."
+            case .failure(let err): self.err.wrappedValue = err.localizedDescription
             }
             downloadViewModel.pending = false
         } onCancellation: {
