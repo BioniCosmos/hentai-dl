@@ -33,8 +33,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         this.pending = true
         this.viewModelScope.launch(Dispatchers.IO) {
-            val (id) = api.createTask(params)
-
             suspend fun fail(e: Exception) {
                 withContext(Dispatchers.Main) {
                     pending = false
@@ -42,45 +40,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            while (true) {
-                val (_, status, message) = api.queryTask(id)
-                when (status) {
-                    "pending" -> {
-                        delay(1.seconds)
-                        continue
-                    }
+            try {
+                val (id) = api.createTask(params)
 
-                    "done" -> {
-                        val resolver = application.contentResolver
-
-                        val fileURI = resolver.insert(
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                            } else {
-                                MediaStore.Files.getContentUri("external")
-                            },
-                            ContentValues().apply {
-                                put(MediaStore.Downloads.DISPLAY_NAME, message)
-                                put(MediaStore.Downloads.IS_PENDING, 1)
-                                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                                    put(
-                                        MediaStore.Downloads.DATA,
-                                        File(
-                                            Environment.getExternalStoragePublicDirectory(
-                                                Environment.DIRECTORY_DOWNLOADS,
-                                            ),
-                                            message,
-                                        ).absolutePath,
-                                    )
-                                }
-                            },
-                        )
-                        if (fileURI == null) {
-                            fail(Exception("failed to insert file to content provider"))
-                            return@launch
+                while (true) {
+                    val (_, status, message) = api.queryTask(id)
+                    when (status) {
+                        "pending" -> {
+                            delay(1.seconds)
+                            continue
                         }
 
-                        try {
+                        "done" -> {
+                            val resolver = application.contentResolver
+
+                            val fileURI = resolver.insert(
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                                } else {
+                                    MediaStore.Files.getContentUri("external")
+                                },
+                                ContentValues().apply {
+                                    put(MediaStore.Downloads.DISPLAY_NAME, message)
+                                    put(MediaStore.Downloads.IS_PENDING, 1)
+                                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                                        put(
+                                            MediaStore.Downloads.DATA,
+                                            File(
+                                                Environment.getExternalStoragePublicDirectory(
+                                                    Environment.DIRECTORY_DOWNLOADS,
+                                                ),
+                                                message,
+                                            ).absolutePath,
+                                        )
+                                    }
+                                },
+                            )
+                            if (fileURI == null) {
+                                fail(Exception("failed to insert file to content provider"))
+                                return@launch
+                            }
+
                             val stream = resolver.openOutputStream(fileURI)
                             if (stream == null) {
                                 fail(Exception("failed to open stream"))
@@ -94,41 +94,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 null,
                                 null,
                             )
-                        } catch (e: Exception) {
-                            // TODO: why should catch CancellationException?
-                            if (e is CancellationException) {
-                                throw e
+
+                            val cursor = resolver.query(
+                                fileURI,
+                                arrayOf(MediaStore.Downloads.DATA),
+                                null,
+                                null,
+                                null,
+                            )
+                            if (cursor == null) {
+                                fail(Exception("failed to get file path"))
+                                return@launch
                             }
-                            e.printStackTrace()
-                            fail(e)
-                            return@launch
+
+                            val path = cursor.use {
+                                it.moveToFirst()
+                                it.getString(it.getColumnIndexOrThrow(MediaStore.Downloads.DATA))
+                            }
+                            withContext(Dispatchers.Main) {
+                                pending = false
+                                onSuccess(path)
+                            }
                         }
 
-                        val cursor = resolver.query(
-                            fileURI,
-                            arrayOf(MediaStore.Downloads.DATA),
-                            null,
-                            null,
-                            null,
-                        )
-                        if (cursor == null) {
-                            fail(Exception("failed to get file path"))
-                            return@launch
-                        }
-
-                        val path = cursor.use {
-                            it.moveToFirst()
-                            it.getString(it.getColumnIndexOrThrow(MediaStore.Downloads.DATA))
-                        }
-                        withContext(Dispatchers.Main) {
-                            pending = false
-                            onSuccess(path)
-                        }
+                        "error" -> fail(Exception(message))
                     }
-
-                    "error" -> fail(Exception(message))
+                    break
                 }
-                break
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e.printStackTrace()
+                fail(e)
             }
         }
     }

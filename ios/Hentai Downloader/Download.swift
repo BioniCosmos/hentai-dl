@@ -15,32 +15,33 @@ class DownloadViewModel {
     func download(with params: API.TaskCreationParams, onFailure: @escaping (Error) -> Void) {
         self.pending = true
         Task {
-            let creationResult = try! await api.createTask(with: params)
-            let id = creationResult.id
-
             @MainActor func fail(with e: String) {
                 self.pending = false
                 onFailure(.init(errorDescription: e))
             }
 
-            while true {
-                let queryResult = try! await api.queryTask(by: id)
-                let message = queryResult.message
+            do {
+                let id = try await api.createTask(with: params).id
 
-                switch queryResult.status {
-                case "pending":
-                    try await Task.sleep(for: .seconds(1))
-                    continue
-                case "done":
-                    let data = try! await api.downloadFile(by: id)
-                    self.name = message
-                    self.document = .init(data: data)
-                    self.exporting = true
-                case "error": fail(with: message)
-                default: fatalError()
+                while true {
+                    let queryResult = try await api.queryTask(by: id)
+                    let message = queryResult.message
+
+                    switch queryResult.status {
+                    case "pending":
+                        try await Task.sleep(for: .seconds(1))
+                        continue
+                    case "done":
+                        let data = try await api.downloadFile(by: id)
+                        self.name = message
+                        self.document = .init(data: data)
+                        self.exporting = true
+                    case "error": fail(with: message)
+                    default: fatalError()
+                    }
+                    break
                 }
-                break
-            }
+            } catch { fail(with: error.localizedDescription) }
         }
     }
 }
