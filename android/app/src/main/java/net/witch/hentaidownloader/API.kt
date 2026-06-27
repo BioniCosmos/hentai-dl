@@ -17,6 +17,7 @@ class API {
     private val client = HttpClient {
         install(ContentNegotiation) { json() }
         defaultRequest { url(BuildConfig.BASE_URL) }
+        expectSuccess = true
     }
 
     sealed interface TaskCreationParams {
