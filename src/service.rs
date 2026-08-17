@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::Write,
-    sync::{Arc, RwLock},
-};
+use std::{fs::File, io::Write, sync::Arc};
 
 use anyhow::{Context, Error, anyhow};
 use http::header;
@@ -16,17 +11,13 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     parser::{ParseResult, Registry},
+    repo::{Task, TaskRepo, TaskStatus, TaskUpdate},
     utils,
 };
 
 pub struct DownloadService {
-    tasks: Arc<RwLock<HashMap<String, Task>>>,
     parser_registry: Arc<Registry>,
-}
-
-struct Task {
-    id: String,
-    result: Option<anyhow::Result<String>>,
+    task_repo: TaskRepo,
 }
 
 #[derive(Clone, Deserialize)]
@@ -41,69 +32,62 @@ pub struct TaskCreationResult {
     pub id: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TaskQueryResult {
-    pub id: String,
-    pub status: &'static str,
-    pub message: String,
-}
+type TaskQueryResult = Task;
 
 impl DownloadService {
-    pub fn new(parser_registry: Arc<Registry>) -> Self {
+    pub fn new(parser_registry: Arc<Registry>, task_repo: TaskRepo) -> Self {
         Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
             parser_registry,
+            task_repo,
         }
     }
 
-    pub fn create_task(&self, params: &TaskCreationParams) -> TaskCreationResult {
-        let id = Uuid::new_v4().to_string();
-        self.tasks.write().unwrap().insert(
-            id.clone(),
-            Task {
+    pub async fn create_task(
+        &self,
+        params: &TaskCreationParams,
+    ) -> anyhow::Result<TaskCreationResult> {
+        let id = Uuid::now_v7().to_string();
+        self.task_repo
+            .create(&Task {
                 id: id.clone(),
-                result: None,
-            },
-        );
+                status: TaskStatus::Pending,
+                message: String::new(),
+            })
+            .await?;
 
         {
             let id = id.clone();
             let params = params.clone();
             let parser_registry = Arc::clone(&self.parser_registry);
-            let tasks = Arc::clone(&self.tasks);
+            let task_repo = self.task_repo.clone();
 
             tokio::spawn(async move {
                 let result = Self::run_task(parser_registry, &id, params).await;
-                if let Err(e) = &result {
-                    tracing::error!(task_id = %id, error = ?e, "task failed");
-                }
-                tasks
-                    .write()
-                    .unwrap()
-                    .get_mut(&id)
-                    .expect("unexpected task miss")
-                    .result = Some(result);
+                let (status, message) = match result {
+                    Ok(file_name) => ("done", file_name),
+                    Err(error) => {
+                        tracing::error!(task_id = %id, ?error, "task failed");
+                        ("error", format!("{error:#}"))
+                    }
+                };
+
+                task_repo
+                    .update(
+                        &id,
+                        &TaskUpdate {
+                            status: Some(status),
+                            message: Some(message),
+                        },
+                    )
+                    .await
             });
         }
 
-        TaskCreationResult { id }
+        Ok(TaskCreationResult { id })
     }
 
-    pub fn query_task(&self, id: &str) -> Option<TaskQueryResult> {
-        self.tasks.read().unwrap().get(id).map(|task| {
-            let (status, message) = match task.result.as_ref() {
-                Some(result) => match result {
-                    Ok(file_name) => ("done", file_name.clone()),
-                    Err(e) => ("error", format!("{e:#}")),
-                },
-                None => ("pending", "".to_owned()),
-            };
-            TaskQueryResult {
-                id: task.id.clone(),
-                status,
-                message,
-            }
-        })
+    pub async fn query_task(&self, id: &str) -> anyhow::Result<Option<TaskQueryResult>> {
+        self.task_repo.query(id).await
     }
 
     async fn run_task(

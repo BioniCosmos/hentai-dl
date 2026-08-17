@@ -1,1 +1,5 @@
 /target
+.env
+*.db*
+*.zip
+.DS_Store

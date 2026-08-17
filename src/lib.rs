@@ -1,5 +1,6 @@
-pub mod parser;
-pub mod service;
 pub mod web;
 
+mod parser;
+mod repo;
+mod service;
 mod utils;
