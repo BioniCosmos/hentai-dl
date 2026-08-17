@@ -1,16 +1,18 @@
 use anyhow::anyhow;
+use reqwest::Url;
 use scraper::{Html, Selector};
 
 use super::{ParseResult, Parser};
+
+const DOMAIN: &str = "telegra.ph";
 
 pub struct Telegraph;
 
 impl Parser for Telegraph {
     fn domain(&self) -> &'static str {
-        "telegra.ph"
+        DOMAIN
     }
 
-    // TODO: convert relative URLs to absolute
     fn parse(&self, raw: &str) -> anyhow::Result<ParseResult> {
         let doc = Html::parse_document(raw);
         let title = doc
@@ -21,9 +23,16 @@ impl Parser for Telegraph {
         let urls = doc
             .select(&Selector::parse("img").expect("unexpected invalid selector"))
             .map(|img| img.attr("src"))
-            .filter(|img| img.is_some())
-            .map(|img| img.unwrap().to_owned())
+            .filter_map(|img| img.and_then(to_absolute))
             .collect();
         Ok(ParseResult::Images { title, urls })
     }
+}
+
+fn to_absolute(relative: &str) -> Option<String> {
+    Url::parse(&format!("https://{DOMAIN}"))
+        .unwrap()
+        .join(relative)
+        .ok()
+        .map(|url| url.into())
 }
