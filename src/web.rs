@@ -61,10 +61,16 @@ pub async fn start() {
                 async |State(download_svc): State<Arc<DownloadService>>,
                        extract::Path(id): extract::Path<String>,
                        mut req: Request| {
-                    // TODO: check task status
                     let Some(task) = download_svc.query_task(&id) else {
                         return StatusCode::NOT_FOUND.into_response();
                     };
+                    match task.status {
+                        "pending" => return (StatusCode::ACCEPTED, Json(task)).into_response(),
+                        "error" => {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, Json(task)).into_response();
+                        }
+                        _ => (),
+                    }
 
                     *req.uri_mut() = format!(
                         "{}.{}",
