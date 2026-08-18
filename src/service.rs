@@ -5,7 +5,7 @@ use http::header;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::{fs, task::JoinSet};
-use tracing::instrument;
+use tracing::error;
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -66,7 +66,7 @@ impl DownloadService {
                 let (status, message) = match result {
                     Ok(file_name) => ("done", file_name),
                     Err(error) => {
-                        tracing::error!(task_id = %id, ?error, "task failed");
+                        error!(task_id = id, ?error, "task failed");
                         ("error", format!("{error:#}"))
                     }
                 };
@@ -112,7 +112,6 @@ impl DownloadService {
         }
     }
 
-    #[instrument(level = "trace")]
     async fn save_images(id: &str, result: ParseResult) -> anyhow::Result<String> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
