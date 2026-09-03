@@ -14,10 +14,10 @@ use tracing::error;
 
 use crate::{
     repo::TaskStatus,
-    service::{DownloadService, TaskCreationParams},
+    service::{DownloadSvc, TaskCreationParams},
 };
 
-pub fn register(app: Router<Arc<DownloadService>>) -> Router<Arc<DownloadService>> {
+pub fn register(app: Router<Arc<DownloadSvc>>) -> Router<Arc<DownloadSvc>> {
     app.route("/", routing::get(INDEX))
         .route("/api/download", routing::post(create_task))
         .route("/api/download/{id}", routing::get(query_task))
@@ -27,7 +27,7 @@ pub fn register(app: Router<Arc<DownloadService>>) -> Router<Arc<DownloadService
 const INDEX: Html<&[u8]> = Html(include_bytes!("../web/index.html"));
 
 async fn create_task(
-    State(download_svc): State<Arc<DownloadService>>,
+    State(download_svc): State<Arc<DownloadSvc>>,
     Json(params): Json<TaskCreationParams>,
 ) -> impl IntoResponse {
     download_svc
@@ -38,7 +38,7 @@ async fn create_task(
 }
 
 async fn query_task(
-    State(download_svc): State<Arc<DownloadService>>,
+    State(download_svc): State<Arc<DownloadSvc>>,
     extract::Path(id): extract::Path<String>,
 ) -> impl IntoResponse {
     download_svc
@@ -49,7 +49,7 @@ async fn query_task(
 }
 
 async fn download_file(
-    State(download_svc): State<Arc<DownloadService>>,
+    State(download_svc): State<Arc<DownloadSvc>>,
     extract::Path(id): extract::Path<String>,
     mut req: Request,
 ) -> impl IntoResponse {

@@ -7,7 +7,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use crate::{parser, repo::TaskRepo, route, service::DownloadService};
+use crate::{parser, repo::TaskRepo, route, service::DownloadSvc};
 
 pub async fn start(database_url: Option<&str>) {
     tracing_subscriber::registry()
@@ -25,7 +25,7 @@ pub async fn start(database_url: Option<&str>) {
     let task_repo = TaskRepo::new(conn);
 
     let parser_registry = Arc::new(parser::init_registry());
-    let download_svc = Arc::new(DownloadService::new(parser_registry, task_repo));
+    let download_svc = Arc::new(DownloadSvc::new(parser_registry, task_repo));
 
     let app = route::register(Router::new())
         .layer(TraceLayer::new_for_http())

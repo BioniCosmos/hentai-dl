@@ -15,7 +15,7 @@ use crate::{
     utils,
 };
 
-pub struct DownloadService {
+pub struct DownloadSvc {
     parser_registry: Arc<Registry>,
     task_repo: TaskRepo,
 }
@@ -34,7 +34,7 @@ pub struct TaskCreationResult {
 
 type TaskQueryResult = Task;
 
-impl DownloadService {
+impl DownloadSvc {
     pub fn new(parser_registry: Arc<Registry>, task_repo: TaskRepo) -> Self {
         Self {
             parser_registry,
