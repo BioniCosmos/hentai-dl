@@ -1,6 +1,6 @@
 use anyhow::anyhow;
-use reqwest::Url;
 use scraper::{Html, Selector};
+use url::Url;
 
 use super::{ParseResult, Parser};
 
