@@ -1,4 +1,4 @@
-use std::{path, sync::Arc};
+use std::path;
 
 use axum::{
     Json, Router,
@@ -6,28 +6,39 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing,
 };
-use http::{StatusCode, header::CONTENT_DISPOSITION};
+use http::{HeaderMap, StatusCode, header::CONTENT_DISPOSITION};
 use percent_encoding::NON_ALPHANUMERIC;
 use tower::ServiceExt as _;
 use tower_http::services::ServeDir;
 use tracing::error;
 
 use crate::{
+    api::Update,
     repo::TaskStatus,
-    service::{DownloadSvc, TaskCreationParams},
+    service::{BotSvc, BotSvcError, DownloadSvc, TaskCreationParams},
 };
 
-pub fn register(app: Router<Arc<DownloadSvc>>) -> Router<Arc<DownloadSvc>> {
+#[derive(Clone)]
+pub struct AppState {
+    pub download_svc: DownloadSvc,
+    pub bot_svc: BotSvc,
+}
+
+pub fn register(app: Router<AppState>) -> Router<AppState> {
     app.route("/", routing::get(INDEX))
         .route("/api/download", routing::post(create_task))
         .route("/api/download/{id}", routing::get(query_task))
         .route("/api/download/file/{id}", routing::get(download_file))
 }
 
+pub fn register_bot_webhook(app: Router<AppState>) -> Router<AppState> {
+    app.route("/api/bot-updates", routing::post(listen_bot_updates))
+}
+
 const INDEX: Html<&[u8]> = Html(include_bytes!("../web/index.html"));
 
 async fn create_task(
-    State(download_svc): State<Arc<DownloadSvc>>,
+    State(AppState { download_svc, .. }): State<AppState>,
     Json(params): Json<TaskCreationParams>,
 ) -> impl IntoResponse {
     download_svc
@@ -38,7 +49,7 @@ async fn create_task(
 }
 
 async fn query_task(
-    State(download_svc): State<Arc<DownloadSvc>>,
+    State(AppState { download_svc, .. }): State<AppState>,
     extract::Path(id): extract::Path<String>,
 ) -> impl IntoResponse {
     download_svc
@@ -49,7 +60,7 @@ async fn query_task(
 }
 
 async fn download_file(
-    State(download_svc): State<Arc<DownloadSvc>>,
+    State(AppState { download_svc, .. }): State<AppState>,
     extract::Path(id): extract::Path<String>,
     mut req: Request,
 ) -> impl IntoResponse {
@@ -97,6 +108,33 @@ async fn download_file(
         )
             .into_response()
     }
+}
+
+async fn listen_bot_updates(
+    State(AppState { bot_svc, .. }): State<AppState>,
+    headers: HeaderMap,
+    Json(update): Json<Update>,
+) -> Response {
+    if let Err(e) = bot_svc
+        .reply(
+            &update,
+            headers
+                .get("X-Telegram-Bot-Api-Secret-Token")
+                .map(|x| x.to_str().ok().unwrap_or_default())
+                .unwrap_or_default(),
+        )
+        .await
+    {
+        return match e.downcast_ref::<BotSvcError>() {
+            Some(e) => match e {
+                BotSvcError::Unauthenticated => {
+                    (StatusCode::UNAUTHORIZED, e.to_string()).into_response()
+                }
+            },
+            None => AppError(e).into_response(),
+        };
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 struct AppError(anyhow::Error);
