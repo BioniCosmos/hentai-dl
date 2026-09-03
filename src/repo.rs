@@ -67,3 +67,37 @@ impl TaskRepo {
         .map_err(anyhow::Error::new)
     }
 }
+
+#[derive(Clone)]
+pub struct ConfigRepo(SqlitePool);
+
+impl ConfigRepo {
+    pub fn new(db: SqlitePool) -> Self {
+        Self(db)
+    }
+
+    pub async fn query(&self, key: &str) -> anyhow::Result<String> {
+        #[derive(Default)]
+        struct Row {
+            value: String,
+        }
+        sqlx::query_as!(Row, "SELECT value FROM configs WHERE key = ?", key)
+            .fetch_optional(&self.0)
+            .await
+            .map(|x| x.unwrap_or_default().value)
+            .map_err(anyhow::Error::new)
+    }
+
+    pub async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        sqlx::query!(
+            "INSERT INTO configs VALUES (?, ?) ON CONFLICT DO UPDATE SET value = ?",
+            key,
+            value,
+            value
+        )
+        .execute(&self.0)
+        .await
+        .and(Ok(()))
+        .map_err(anyhow::Error::new)
+    }
+}
