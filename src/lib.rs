@@ -1,8 +1,7 @@
-pub mod web;
+pub mod api;
+pub mod parser;
+pub mod repo;
+pub mod route;
+pub mod service;
 
-mod api;
-mod parser;
-mod repo;
-mod route;
-mod service;
 mod utils;
