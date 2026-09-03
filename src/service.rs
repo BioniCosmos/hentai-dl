@@ -1,20 +1,29 @@
-use std::{fs::File, io::Write, sync::Arc};
+use std::{
+    error,
+    fmt::{self, Display, Formatter},
+    fs::File,
+    io::Write,
+    sync::Arc,
+};
 
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, anyhow};
 use http::header;
-use reqwest::Url;
+use rand::distr::{Alphanumeric, SampleString as _};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, task::JoinSet};
 use tracing::error;
+use url::Url;
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
+    api::{BotAPI, Update},
     parser::{ParseResult, Registry},
-    repo::{Task, TaskRepo, TaskStatus, TaskUpdate},
+    repo::{ConfigRepo, Task, TaskRepo, TaskStatus, TaskUpdate},
     utils,
 };
 
+#[derive(Clone)]
 pub struct DownloadSvc {
     parser_registry: Arc<Registry>,
     task_repo: TaskRepo,
@@ -126,7 +135,7 @@ impl DownloadSvc {
                     .headers()
                     .get(header::CONTENT_TYPE)
                     .context("`Content-Type` header not found")
-                    .and_then(|media_type| media_type.to_str().map_err(Error::new))?;
+                    .and_then(|media_type| media_type.to_str().map_err(anyhow::Error::new))?;
                 Ok((
                     format!(
                         "{i:0>width$}.{}",
@@ -142,7 +151,7 @@ impl DownloadSvc {
             .join_all()
             .await
             .into_iter()
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
         results.sort();
 
         let mut writer = ZipWriter::new(File::create(format!("{id}.zip"))?);
@@ -154,5 +163,79 @@ impl DownloadSvc {
         writer.finish()?;
 
         Ok(title + ".zip")
+    }
+}
+
+macro_rules! get {
+    ($r:expr) => {{
+        use crate::api::Response::*;
+
+        match $r {
+            Success(result) => result,
+            Failure {
+                error_code,
+                description,
+            } => anyhow::bail!("bot API error {error_code}: {description}"),
+        }
+    }};
+}
+
+#[derive(Clone)]
+pub struct BotSvc {
+    api: BotAPI,
+    repo: ConfigRepo,
+}
+
+#[derive(Debug)]
+pub enum BotSvcError {
+    Unauthenticated,
+}
+
+impl error::Error for BotSvcError {}
+
+impl Display for BotSvcError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        use BotSvcError::*;
+
+        match self {
+            Unauthenticated => write!(f, "Unauthorized request. The secret token is invalid."),
+        }
+    }
+}
+
+impl BotSvc {
+    pub fn new(api: BotAPI, repo: ConfigRepo) -> Self {
+        Self { api, repo }
+    }
+
+    pub async fn set_webhook(&self, base_url: &str) -> anyhow::Result<()> {
+        let webhook_url = Url::parse(base_url)?.join("/api/bot-updates")?;
+
+        let info = get!(self.api.get_webhook_info().await?);
+        if info.url == webhook_url.as_str() {
+            return Ok(());
+        }
+
+        get!(self.api.delete_webhook().await?);
+
+        let secret = Alphanumeric.sample_string(&mut rand::rng(), 256);
+        get!(self.api.set_webhook(webhook_url.as_str(), &secret).await?);
+        self.repo.set("secret", &secret).await
+    }
+
+    pub async fn reply(&self, update: &Update, secret: &str) -> anyhow::Result<()> {
+        if secret != self.repo.query("secret").await? {
+            return Err(anyhow::Error::new(BotSvcError::Unauthenticated));
+        }
+
+        get!(
+            self.api
+                .send_message(
+                    update.message.as_ref().unwrap().chat.id,
+                    update.message.as_ref().unwrap().text.as_ref().unwrap(),
+                )
+                .await?
+        );
+        Ok(())
     }
 }
