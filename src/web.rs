@@ -9,7 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::{parser, repo::TaskRepo, route, service::DownloadService};
 
-pub async fn start() {
+pub async fn start(database_url: Option<&str>) {
     tracing_subscriber::registry()
         .with(fmt::layer().pretty())
         .with(
@@ -19,10 +19,9 @@ pub async fn start() {
         )
         .init();
 
-    let conn =
-        SqlitePool::connect(&dotenvy::var("DATABASE_URL").unwrap_or("sqlite::memory:".to_owned()))
-            .await
-            .expect("failed to connect to database");
+    let conn = SqlitePool::connect(database_url.unwrap_or("sqlite::memory:"))
+        .await
+        .expect("failed to connect to database");
     let task_repo = TaskRepo::new(conn);
 
     let parser_registry = Arc::new(parser::init_registry());
