@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use opendal::Operator;
 use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
@@ -18,18 +19,20 @@ use hentai_dl::{
 async fn main() {
     init_trace();
 
-    let database_url = dotenvy::var("DATABASE_URL").ok();
+    let database_url = dotenvy::var("DATABASE_URL").unwrap_or("sqlite::memory:".to_owned());
+    let storage_url = dotenvy::var("STORAGE_URL").unwrap_or("fs://?root=.".to_owned());
     let bot_token = dotenvy::var("BOT_TOKEN").expect("expecting `BOT_TOKEN`");
     let base_url = dotenvy::var("BASE_URL").expect("expecting `BASE_URL`");
 
-    let db = SqlitePool::connect(database_url.as_deref().unwrap_or("sqlite::memory:"))
+    let db = SqlitePool::connect(&database_url)
         .await
         .expect("failed to connect to database");
     let task_repo = TaskRepo::new(db.clone());
     let config_repo = ConfigRepo::new(db);
 
     let parser_registry = Arc::new(parser::init_registry());
-    let download_svc = DownloadSvc::new(parser_registry, task_repo);
+    let op = init_operator(&storage_url);
+    let download_svc = DownloadSvc::new(parser_registry, task_repo, op);
 
     let bot_api = BotAPI::new(&bot_token);
     let bot_svc = BotSvc::new(bot_api, config_repo);
@@ -56,6 +59,10 @@ fn init_trace() {
                 .expect("failed to initialize the filter layer"),
         )
         .init();
+}
+
+fn init_operator(storage_url: &str) -> Operator {
+    Operator::from_uri(storage_url).expect("failed to initialize storage operator")
 }
 
 async fn start(state: AppState) {

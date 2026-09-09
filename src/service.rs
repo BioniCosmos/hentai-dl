@@ -1,16 +1,16 @@
 use std::{
     error,
     fmt::{self, Display, Formatter},
-    fs::File,
-    io::Write,
+    io::{self, ErrorKind, Read, Write},
     sync::Arc,
 };
 
 use anyhow::{Context, anyhow};
 use http::header;
+use opendal::Operator;
 use rand::distr::{Alphanumeric, SampleString as _};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, task::JoinSet};
+use tokio::{task::JoinSet, try_join};
 use tracing::error;
 use url::Url;
 use uuid::Uuid;
@@ -27,6 +27,7 @@ use crate::{
 pub struct DownloadSvc {
     parser_registry: Arc<Registry>,
     task_repo: TaskRepo,
+    op: Operator,
 }
 
 #[derive(Clone, Deserialize)]
@@ -44,10 +45,11 @@ pub struct TaskCreationResult {
 type TaskQueryResult = Task;
 
 impl DownloadSvc {
-    pub fn new(parser_registry: Arc<Registry>, task_repo: TaskRepo) -> Self {
+    pub fn new(parser_registry: Arc<Registry>, task_repo: TaskRepo, op: Operator) -> Self {
         Self {
             parser_registry,
             task_repo,
+            op,
         }
     }
 
@@ -67,11 +69,10 @@ impl DownloadSvc {
         {
             let id = id.clone();
             let params = params.clone();
-            let parser_registry = Arc::clone(&self.parser_registry);
-            let task_repo = self.task_repo.clone();
+            let svc = self.clone();
 
             tokio::spawn(async move {
-                let result = Self::run_task(parser_registry, &id, params).await;
+                let result = svc.run_task(&id, params).await;
                 let (status, message) = match result {
                     Ok(file_name) => ("done", file_name),
                     Err(error) => {
@@ -80,7 +81,7 @@ impl DownloadSvc {
                     }
                 };
 
-                task_repo
+                svc.task_repo
                     .update(
                         &id,
                         &TaskUpdate {
@@ -99,29 +100,26 @@ impl DownloadSvc {
         self.task_repo.query(id).await
     }
 
-    async fn run_task(
-        parser_registry: Arc<Registry>,
-        id: &str,
-        params: TaskCreationParams,
-    ) -> anyhow::Result<String> {
+    async fn run_task(&self, id: &str, params: TaskCreationParams) -> anyhow::Result<String> {
         let (url, raw) = match params {
             TaskCreationParams::Url { ref url } => (url, reqwest::get(url).await?.text().await?),
             TaskCreationParams::Raw { ref url, raw } => (url, raw),
         };
-        match parser_registry
+        match self
+            .parser_registry
             .get(Url::parse(url)?.host_str().context("invalid url")?)
             .context("unsupported origin")?
             .parse(&raw)?
         {
             ParseResult::Markdown { title, body } => {
-                fs::write(format!("{id}.md"), body).await?;
+                self.op.write(&format!("{id}.md"), body).await?;
                 Ok(format!("{title}.md"))
             }
-            result @ ParseResult::Images { .. } => Self::save_images(id, result).await,
+            result @ ParseResult::Images { .. } => self.save_images(id, result).await,
         }
     }
 
-    async fn save_images(id: &str, result: ParseResult) -> anyhow::Result<String> {
+    async fn save_images(&self, id: &str, result: ParseResult) -> anyhow::Result<String> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
         };
@@ -154,13 +152,45 @@ impl DownloadSvc {
             .collect::<anyhow::Result<Vec<_>>>()?;
         results.sort();
 
-        let mut writer = ZipWriter::new(File::create(format!("{id}.zip"))?);
-        let options = SimpleFileOptions::default();
-        for (name, res) in results {
-            writer.start_file(format!("{title}/{name}"), options)?;
-            writer.write_all(&res)?;
+        let mut writer = self.op.writer(&format!("{id}.zip")).await?;
+        let (mut rx, tx) = io::pipe()?;
+
+        let compress_task = async {
+            let title_clone = title.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut writer = ZipWriter::new_stream(tx);
+                let options = SimpleFileOptions::default();
+                for (name, res) in results {
+                    writer.start_file(format!("{title_clone}/{name}"), options)?;
+                    writer.write_all(&res)?;
+                }
+                writer.finish()
+            })
+            .await??;
+            anyhow::Ok(())
+        };
+
+        let save_task = async {
+            loop {
+                let mut buf = vec![0u8; 1024 * 64];
+                match rx.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        writer.write(buf).await?
+                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(anyhow::Error::new(e)),
+                }
+            }
+            Ok(())
+        };
+
+        if let Err(e) = try_join!(compress_task, save_task) {
+            writer.abort().await?;
+            return Err(e);
         }
-        writer.finish()?;
+        writer.close().await?;
 
         Ok(title + ".zip")
     }

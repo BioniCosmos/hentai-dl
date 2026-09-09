@@ -8,6 +8,7 @@ anyhow = "1"
 axum = "0.8"
 dotenvy = "0.15"
 http = "1"
+opendal = { version = "0.59", features = ["services-fs"] }
 percent-encoding = "2"
 rand = "0.10"
 reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
