@@ -1,36 +1,35 @@
 use std::{
-    error,
-    fmt::{self, Display, Formatter},
-    io::{self, ErrorKind, Read, Write},
-    sync::Arc,
+    collections::HashMap,
+    io::{self, ErrorKind, Read as _, Write as _},
+    sync::LazyLock,
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use http::header;
-use opendal::Operator;
 use rand::distr::{Alphanumeric, SampleString as _};
 use serde::{Deserialize, Serialize};
-use tokio::{task::JoinSet, try_join};
-use tracing::error;
+use tokio::{
+    sync::{
+        RwLock,
+        oneshot::{self, Receiver},
+    },
+    task::JoinSet,
+    try_join,
+};
+use tracing::{Instrument, error, field::Empty, info_span, instrument, warn};
 use url::Url;
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    api::{BotAPI, Update},
-    parser::{ParseResult, Registry},
-    repo::{ConfigRepo, Task, TaskRepo, TaskStatus, TaskUpdate},
+    Context,
+    api::{self, Update},
+    parser::ParseResult,
+    repo::{Task, TaskStatus, TaskUpdate, config as config_repo, task as task_repo},
     utils,
 };
 
-#[derive(Clone)]
-pub struct DownloadSvc {
-    parser_registry: Arc<Registry>,
-    task_repo: TaskRepo,
-    op: Operator,
-}
-
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "paramType", rename_all = "camelCase")]
 pub enum TaskCreationParams {
     Url { url: String },
@@ -44,35 +43,43 @@ pub struct TaskCreationResult {
 
 type TaskQueryResult = Task;
 
-impl DownloadSvc {
-    pub fn new(parser_registry: Arc<Registry>, task_repo: TaskRepo, op: Operator) -> Self {
-        Self {
-            parser_registry,
-            task_repo,
-            op,
-        }
-    }
+type Tasks = LazyLock<RwLock<HashMap<String, Receiver<(&'static str, String)>>>>;
+static TASKS: Tasks = LazyLock::new(Default::default);
 
+pub mod download {
+    use super::*;
+
+    #[instrument(err(Debug), skip(ctx))]
     pub async fn create_task(
-        &self,
+        ctx: &Context,
         params: &TaskCreationParams,
-    ) -> anyhow::Result<TaskCreationResult> {
+        signal: bool,
+    ) -> Result<TaskCreationResult> {
         let id = Uuid::now_v7().to_string();
-        self.task_repo
-            .create(&Task {
+        task_repo::create(
+            ctx,
+            &Task {
                 id: id.clone(),
                 status: TaskStatus::Pending,
                 message: String::new(),
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         {
             let id = id.clone();
             let params = params.clone();
-            let svc = self.clone();
+            let ctx = ctx.clone();
+            let tx = if signal {
+                let (tx, rx) = oneshot::channel();
+                TASKS.write().await.insert(id.clone(), rx);
+                Some(tx)
+            } else {
+                None
+            };
 
             tokio::spawn(async move {
-                let result = svc.run_task(&id, params).await;
+                let result = run_task(&ctx, &id, params).await;
                 let (status, message) = match result {
                     Ok(file_name) => ("done", file_name),
                     Err(error) => {
@@ -81,45 +88,62 @@ impl DownloadSvc {
                     }
                 };
 
-                svc.task_repo
-                    .update(
-                        &id,
-                        &TaskUpdate {
-                            status: Some(status),
-                            message: Some(message),
-                        },
-                    )
-                    .await
+                if let Err(error) = task_repo::update(
+                    &ctx,
+                    &id,
+                    &TaskUpdate {
+                        status: Some(status),
+                        message: Some(message.clone()),
+                    },
+                )
+                .await
+                {
+                    warn!(
+                        task_id = id,
+                        ?error,
+                        task_status = status,
+                        task_message = message,
+                        "failed to update task status in database",
+                    );
+                }
+                if let Some(tx) = tx
+                    && let Err((task_status, task_message)) = tx.send((status, message))
+                {
+                    warn!(
+                        task_id = id,
+                        task_status, task_message, "failed to send task status signal",
+                    );
+                }
             });
         }
 
         Ok(TaskCreationResult { id })
     }
 
-    pub async fn query_task(&self, id: &str) -> anyhow::Result<Option<TaskQueryResult>> {
-        self.task_repo.query(id).await
+    pub async fn query_task(ctx: &Context, id: &str) -> Result<Option<TaskQueryResult>> {
+        task_repo::query(ctx, id).await
     }
 
-    async fn run_task(&self, id: &str, params: TaskCreationParams) -> anyhow::Result<String> {
+    async fn run_task(ctx: &Context, id: &str, params: TaskCreationParams) -> Result<String> {
         let (url, raw) = match params {
             TaskCreationParams::Url { ref url } => (url, reqwest::get(url).await?.text().await?),
             TaskCreationParams::Raw { ref url, raw } => (url, raw),
         };
-        match self
-            .parser_registry
+        match ctx
+            .parsers
             .get(Url::parse(url)?.host_str().context("invalid url")?)
             .context("unsupported origin")?
             .parse(&raw)?
         {
             ParseResult::Markdown { title, body } => {
-                self.op.write(&format!("{id}.md"), body).await?;
+                ctx.store.write(&format!("{id}.md"), body).await?;
                 Ok(format!("{title}.md"))
             }
-            result @ ParseResult::Images { .. } => self.save_images(id, result).await,
+            result @ ParseResult::Images { .. } => save_images(ctx, id, result).await,
         }
     }
 
-    async fn save_images(&self, id: &str, result: ParseResult) -> anyhow::Result<String> {
+    async fn save_images(ctx: &Context, id: &str, result: ParseResult) -> Result<String> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
         };
@@ -149,10 +173,10 @@ impl DownloadSvc {
             .join_all()
             .await
             .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         results.sort();
 
-        let mut writer = self.op.writer(&format!("{id}.zip")).await?;
+        let mut writer = ctx.store.writer(&format!("{id}.zip")).await?;
         let (mut rx, tx) = io::pipe()?;
 
         let compress_task = async {
@@ -196,76 +220,164 @@ impl DownloadSvc {
     }
 }
 
-macro_rules! get {
-    ($r:expr) => {{
-        use crate::api::Response::*;
+pub mod bot {
+    use super::{download as download_svc, *};
 
-        match $r {
-            Success(result) => result,
-            Failure {
-                error_code,
-                description,
-            } => anyhow::bail!("bot API error {error_code}: {description}"),
-        }
-    }};
-}
+    macro_rules! map {
+        ($r:expr) => {{
+            use crate::api::Response::*;
 
-#[derive(Clone)]
-pub struct BotSvc {
-    api: BotAPI,
-    repo: ConfigRepo,
-}
-
-#[derive(Debug)]
-pub enum BotSvcError {
-    Unauthenticated,
-}
-
-impl error::Error for BotSvcError {}
-
-impl Display for BotSvcError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        use BotSvcError::*;
-
-        match self {
-            Unauthenticated => write!(f, "Unauthorized request. The secret token is invalid."),
-        }
-    }
-}
-
-impl BotSvc {
-    pub fn new(api: BotAPI, repo: ConfigRepo) -> Self {
-        Self { api, repo }
+            match $r {
+                Success(result) => Ok(result),
+                Failure {
+                    error_code,
+                    description,
+                } => Err(anyhow!("bot API error {error_code}: {description}")),
+            }
+        }};
     }
 
-    pub async fn set_webhook(&self, base_url: &str) -> anyhow::Result<()> {
+    #[derive(Debug)]
+    pub enum Error {
+        Unauthenticated,
+        InvalidPayload,
+        NoSignal,
+        Internal,
+    }
+
+    impl std::error::Error for Error {}
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            use Error::*;
+
+            match self {
+                Unauthenticated => write!(f, "Unauthorized request. The secret token is invalid."),
+                InvalidPayload => write!(f, "invalid payload"),
+                NoSignal => write!(
+                    f,
+                    "The corresponding task signal receiver cannot be found or the sender has been dropped."
+                ),
+                Internal => write!(f, "internal server error"),
+            }
+        }
+    }
+
+    pub async fn set_webhook(ctx: &Context, base_url: &str) -> Result<()> {
         let webhook_url = Url::parse(base_url)?.join("/api/bot-updates")?;
 
-        let info = get!(self.api.get_webhook_info().await?);
+        let info = map!(api::get_webhook_info(ctx).await?)?;
         if info.url == webhook_url.as_str() {
             return Ok(());
         }
 
-        get!(self.api.delete_webhook().await?);
+        map!(api::delete_webhook(ctx).await?)?;
 
         let secret = Alphanumeric.sample_string(&mut rand::rng(), 256);
-        get!(self.api.set_webhook(webhook_url.as_str(), &secret).await?);
-        self.repo.set("secret", &secret).await
+        map!(api::set_webhook(ctx, webhook_url.as_str(), &secret).await?)?;
+        config_repo::set(ctx, "secret", &secret).await
     }
 
-    pub async fn reply(&self, update: &Update, secret: &str) -> anyhow::Result<()> {
-        if secret != self.repo.query("secret").await? {
-            return Err(anyhow::Error::new(BotSvcError::Unauthenticated));
+    // TODO: task status string -> enum
+    // TODO: store file real name into db
+    // TODO: log all error on the webhook route
+    // TODO: remove TASKS
+    #[instrument(err(Debug), skip(ctx))]
+    pub async fn reply(ctx: Context, update: Update, secret: &str) -> Result<()> {
+        if secret != config_repo::query(&ctx, "secret").await? {
+            return Err(anyhow::Error::new(Error::Unauthenticated));
         }
+        let Some(message) = update.message else {
+            return Err(anyhow::Error::new(Error::InvalidPayload));
+        };
 
-        get!(
-            self.api
-                .send_message(
-                    update.message.as_ref().unwrap().chat.id,
-                    update.message.as_ref().unwrap().text.as_ref().unwrap(),
-                )
-                .await?
+        let span = info_span!("bot-message-handler", task_id = Empty);
+        let s = span.clone();
+        tokio::spawn(
+            async move {
+                let chat_id = message.chat.id;
+
+                let handle = async || {
+                    let message = message
+                        .text
+                        .context("empty message (or unsupported message type)")?;
+
+                    let TaskCreationResult { id } = download_svc::create_task(
+                        &ctx,
+                        &TaskCreationParams::Url { url: message },
+                        true,
+                    )
+                    .await
+                    .context(Error::Internal)?;
+                    s.record("task_id", &id);
+
+                    let rx = TASKS.write().await.remove(&id).ok_or(Error::NoSignal)?;
+                    let (status, message) = rx.await.context(Error::NoSignal)?;
+                    match status {
+                        "done" => {
+                            let path = format!(
+                                "{}.{}",
+                                id,
+                                std::path::Path::new(&message)
+                                    .extension()
+                                    .expect("unexpected invalid file name")
+                                    .display()
+                            );
+                            let meta = ctx
+                                .store
+                                .stat(&path)
+                                .await
+                                .context("failed to read file metadata")
+                                .context(Error::Internal)?;
+                            let stream = ctx
+                                .store
+                                .reader(&path)
+                                .await
+                                .context("failed to get file reader")
+                                .context(Error::Internal)?
+                                .into_bytes_stream(..)
+                                .await
+                                .context("failed to get file stream")
+                                .context(Error::Internal)?;
+                            map!(
+                                api::send_document(
+                                    &ctx,
+                                    chat_id,
+                                    &message,
+                                    meta.content_length(),
+                                    stream
+                                )
+                                .await
+                                .context(Error::Internal)?
+                            )
+                            .context(Error::Internal)?;
+                        }
+                        "error" => return Err(anyhow!(message)),
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                };
+
+                if let Err(error) = handle().await {
+                    error!(?error, "failed to handle bot message");
+                    if let Err(error) = api::send_message(
+                        &ctx,
+                        chat_id,
+                        &if error.is::<Error>() {
+                            "internal server error".to_owned()
+                        } else {
+                            error.to_string()
+                        },
+                    )
+                    .await
+                    {
+                        warn!(?error, "failed to send back error message to user");
+                    }
+                }
+            }
+            .instrument(span),
         );
+
         Ok(())
     }
 }

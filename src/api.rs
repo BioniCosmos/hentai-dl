@@ -7,6 +7,7 @@ use reqwest::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
+use tracing::instrument;
 use url::Url;
 
 use crate::Context;
@@ -100,6 +101,7 @@ pub async fn send_message(
         .await
 }
 
+#[instrument(err(Debug), skip(ctx, stream))]
 pub async fn send_document<S>(
     ctx: &Context,
     chat_id: i64,
@@ -108,7 +110,8 @@ pub async fn send_document<S>(
     stream: S,
 ) -> anyhow::Result<Response<Empty>>
 where
-    S: TryStream<Error = Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+    S: TryStream + Send + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     Bytes: From<S::Ok>,
 {
     request(ctx, Method::POST, "sendDocument")

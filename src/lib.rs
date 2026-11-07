@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use opendal::Operator;
 use reqwest::Client;
 use sqlx::SqlitePool;
 use url::Url;
+
+use crate::parser::Registry;
 
 pub mod api;
 pub mod parser;
@@ -11,13 +15,15 @@ pub mod service;
 
 mod utils;
 
-struct Context {
-    db: SqlitePool,
-    http: Client,
-    store: Operator,
-    config: Config,
+#[derive(Clone)]
+pub struct Context {
+    pub db: SqlitePool,
+    pub http: Client,
+    pub store: Operator,
+    pub config: Arc<Config>,
+    pub parsers: Arc<Registry>,
 }
 
-struct Config {
-    bot_api: Url,
+pub struct Config {
+    pub bot_api: Url,
 }

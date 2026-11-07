@@ -24,7 +24,7 @@ pub struct TaskUpdate {
     pub message: Option<String>,
 }
 
-mod task {
+pub mod task {
     use super::*;
 
     pub async fn create(ctx: &Context, task: &Task) -> anyhow::Result<()> {
@@ -65,7 +65,7 @@ mod task {
     }
 }
 
-mod config {
+pub mod config {
     use super::*;
 
     pub async fn query(ctx: &Context, key: &str) -> anyhow::Result<String> {
