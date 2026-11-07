@@ -1,19 +1,15 @@
-use std::sync::Arc;
-
+use bytes::Bytes;
+use futures::TryStream;
 use http::Method;
 use reqwest::{
-    Client, RequestBuilder,
+    Body, RequestBuilder,
     multipart::{Form, Part},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use url::Url;
 
-#[derive(Clone)]
-pub struct BotAPI {
-    client: Client,
-    base_url: Arc<Url>,
-}
+use crate::Context;
 
 #[derive(Debug, Deserialize)]
 #[serde(from = "RawResponse<T>")]
@@ -70,61 +66,63 @@ pub struct Chat {
 #[derive(Deserialize)]
 pub struct Empty {}
 
-impl BotAPI {
-    pub fn new(token: &str) -> Self {
-        Self {
-            client: Client::new(),
-            base_url: Arc::new(
-                Url::parse(&format!("https://api.telegram.org/bot{token}/")).unwrap(),
-            ),
-        }
-    }
+pub fn init(token: &str) -> Url {
+    Url::parse(&format!("https://api.telegram.org/bot{token}/")).unwrap()
+}
 
-    pub async fn get_webhook_info(&self) -> anyhow::Result<Response<WebhookInfo>> {
-        self.request(Method::GET, "getWebhookInfo").go().await
-    }
+pub async fn get_webhook_info(ctx: &Context) -> anyhow::Result<Response<WebhookInfo>> {
+    request(ctx, Method::GET, "getWebhookInfo").go().await
+}
 
-    pub async fn set_webhook(
-        &self,
-        url: &str,
-        secret_token: &str,
-    ) -> anyhow::Result<Response<bool>> {
-        self.request(Method::POST, "setWebhook")
-            .json(&json!({ "url": url, "secret_token": secret_token }))
-            .go()
-            .await
-    }
+pub async fn set_webhook(
+    ctx: &Context,
+    url: &str,
+    secret_token: &str,
+) -> anyhow::Result<Response<bool>> {
+    request(ctx, Method::POST, "setWebhook")
+        .json(&json!({ "url": url, "secret_token": secret_token }))
+        .go()
+        .await
+}
 
-    pub async fn delete_webhook(&self) -> anyhow::Result<Response<bool>> {
-        self.request(Method::POST, "deleteWebhook").go().await
-    }
+pub async fn delete_webhook(ctx: &Context) -> anyhow::Result<Response<bool>> {
+    request(ctx, Method::POST, "deleteWebhook").go().await
+}
 
-    pub async fn send_message(&self, chat_id: i64, text: &str) -> anyhow::Result<Response<Empty>> {
-        self.request(Method::POST, "sendMessage")
-            .json(&json!({ "chat_id": chat_id, "text": text }))
-            .go()
-            .await
-    }
+pub async fn send_message(
+    ctx: &Context,
+    chat_id: i64,
+    text: &str,
+) -> anyhow::Result<Response<Empty>> {
+    request(ctx, Method::POST, "sendMessage")
+        .json(&json!({ "chat_id": chat_id, "text": text }))
+        .go()
+        .await
+}
 
-    pub async fn send_document(
-        &self,
-        chat_id: i64,
-        file_name: &str,
-        file_path: &str,
-    ) -> anyhow::Result<Response<Empty>> {
-        self.request(Method::POST, "sendDocument")
-            .multipart(Form::new().text("chat_id", chat_id.to_string()).part(
-                "document",
-                Part::file(file_path).await?.file_name(file_name.to_owned()),
-            ))
-            .go()
-            .await
-    }
+pub async fn send_document<S>(
+    ctx: &Context,
+    chat_id: i64,
+    name: &str,
+    len: u64,
+    stream: S,
+) -> anyhow::Result<Response<Empty>>
+where
+    S: TryStream<Error = Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+    Bytes: From<S::Ok>,
+{
+    request(ctx, Method::POST, "sendDocument")
+        .multipart(Form::new().text("chat_id", chat_id.to_string()).part(
+            "document",
+            Part::stream_with_length(Body::wrap_stream(stream), len).file_name(name.to_owned()),
+        ))
+        .go()
+        .await
+}
 
-    fn request(&self, method: Method, action: &'static str) -> RequestBuilder {
-        self.client
-            .request(method, self.base_url.join(action).unwrap())
-    }
+fn request(ctx: &Context, method: Method, action: &'static str) -> RequestBuilder {
+    ctx.http
+        .request(method, ctx.config.bot_api.join(action).unwrap())
 }
 
 trait RequestBuilderExt {
