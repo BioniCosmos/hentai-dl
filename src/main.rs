@@ -2,17 +2,16 @@ use std::sync::Arc;
 
 use axum::Router;
 use opendal::Operator;
+use reqwest::Client;
 use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use hentai_dl::{
-    api::BotAPI,
-    parser,
-    repo::{ConfigRepo, TaskRepo},
-    route::{self, AppState},
-    service::{BotSvc, DownloadSvc},
+    Config, Context, api, parser,
+    route::{self},
+    service::bot as bot_svc,
 };
 
 #[tokio::main]
@@ -24,28 +23,22 @@ async fn main() {
     let bot_token = dotenvy::var("BOT_TOKEN").expect("expecting `BOT_TOKEN`");
     let base_url = dotenvy::var("BASE_URL").expect("expecting `BASE_URL`");
 
-    let db = SqlitePool::connect(&database_url)
-        .await
-        .expect("failed to connect to database");
-    let task_repo = TaskRepo::new(db.clone());
-    let config_repo = ConfigRepo::new(db);
+    let ctx = Context {
+        db: SqlitePool::connect(&database_url)
+            .await
+            .expect("failed to connect to database"),
+        http: Client::new(),
+        store: init_operator(&storage_url),
+        config: Arc::new(Config {
+            bot_api: api::init(&bot_token),
+        }),
+        parsers: Arc::new(parser::init_registry()),
+    };
 
-    let parser_registry = Arc::new(parser::init_registry());
-    let op = init_operator(&storage_url);
-    let download_svc = DownloadSvc::new(parser_registry, task_repo, op);
-
-    let bot_api = BotAPI::new(&bot_token);
-    let bot_svc = BotSvc::new(bot_api, config_repo);
-    bot_svc
-        .set_webhook(&base_url)
+    bot_svc::set_webhook(&ctx, &base_url)
         .await
         .expect("failed to initialize bot service");
-
-    start(AppState {
-        download_svc,
-        bot_svc,
-    })
-    .await;
+    start(ctx).await;
 }
 
 fn init_trace() {
@@ -65,7 +58,7 @@ fn init_operator(storage_url: &str) -> Operator {
     Operator::from_uri(storage_url).expect("failed to initialize storage operator")
 }
 
-async fn start(state: AppState) {
+async fn start(state: Context) {
     let app = route::register_bot_webhook(route::register(Router::new()))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
