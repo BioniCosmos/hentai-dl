@@ -13,58 +13,51 @@ use tower_http::services::ServeDir;
 use tracing::error;
 
 use crate::{
+    Context,
     api::Update,
     repo::TaskStatus,
-    service::{BotSvc, BotSvcError, DownloadSvc, TaskCreationParams},
+    service::{TaskCreationParams, bot as bot_svc, download as download_svc},
 };
 
-#[derive(Clone)]
-pub struct AppState {
-    pub download_svc: DownloadSvc,
-    pub bot_svc: BotSvc,
-}
-
-pub fn register(app: Router<AppState>) -> Router<AppState> {
+pub fn register(app: Router<Context>) -> Router<Context> {
     app.route("/", routing::get(INDEX))
         .route("/api/download", routing::post(create_task))
         .route("/api/download/{id}", routing::get(query_task))
         .route("/api/download/file/{id}", routing::get(download_file))
 }
 
-pub fn register_bot_webhook(app: Router<AppState>) -> Router<AppState> {
+pub fn register_bot_webhook(app: Router<Context>) -> Router<Context> {
     app.route("/api/bot-updates", routing::post(listen_bot_updates))
 }
 
 const INDEX: Html<&[u8]> = Html(include_bytes!("../web/index.html"));
 
 async fn create_task(
-    State(AppState { download_svc, .. }): State<AppState>,
+    State(ctx): State<Context>,
     Json(params): Json<TaskCreationParams>,
 ) -> impl IntoResponse {
-    download_svc
-        .create_task(&params)
+    download_svc::create_task(&ctx, &params, false)
         .await
         .map(Json)
         .map_err(AppError)
 }
 
 async fn query_task(
-    State(AppState { download_svc, .. }): State<AppState>,
+    State(ctx): State<Context>,
     extract::Path(id): extract::Path<String>,
 ) -> impl IntoResponse {
-    download_svc
-        .query_task(&id)
+    download_svc::query_task(&ctx, &id)
         .await
         .map(|result| NotFound(result.map(Json)))
         .map_err(AppError)
 }
 
 async fn download_file(
-    State(AppState { download_svc, .. }): State<AppState>,
+    State(ctx): State<Context>,
     extract::Path(id): extract::Path<String>,
     mut req: Request,
 ) -> impl IntoResponse {
-    let task = match download_svc.query_task(&id).await {
+    let task = match download_svc::query_task(&ctx, &id).await {
         Ok(result) => match result {
             Some(task) => match task.status {
                 TaskStatus::Pending => {
@@ -111,25 +104,26 @@ async fn download_file(
 }
 
 async fn listen_bot_updates(
-    State(AppState { bot_svc, .. }): State<AppState>,
+    State(ctx): State<Context>,
     headers: HeaderMap,
     Json(update): Json<Update>,
 ) -> Response {
-    if let Err(e) = bot_svc
-        .reply(
-            &update,
-            headers
-                .get("X-Telegram-Bot-Api-Secret-Token")
-                .map(|x| x.to_str().ok().unwrap_or_default())
-                .unwrap_or_default(),
-        )
-        .await
+    if let Err(e) = bot_svc::reply(
+        ctx,
+        update,
+        headers
+            .get("X-Telegram-Bot-Api-Secret-Token")
+            .map(|x| x.to_str().ok().unwrap_or_default())
+            .unwrap_or_default(),
+    )
+    .await
     {
-        return match e.downcast_ref::<BotSvcError>() {
+        use bot_svc::Error::{self, *};
+        return match e.downcast_ref::<Error>() {
             Some(e) => match e {
-                BotSvcError::Unauthenticated => {
-                    (StatusCode::UNAUTHORIZED, e.to_string()).into_response()
-                }
+                Unauthenticated => (StatusCode::UNAUTHORIZED, e.to_string()).into_response(),
+                InvalidPayload => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+                _ => unreachable!(),
             },
             None => AppError(e).into_response(),
         };
