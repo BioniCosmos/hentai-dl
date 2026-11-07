@@ -1,8 +1,7 @@
 use serde::Serialize;
-use sqlx::{SqlitePool, prelude::Type};
+use sqlx::prelude::Type;
 
-#[derive(Clone)]
-pub struct TaskRepo(SqlitePool);
+use crate::Context;
 
 #[derive(Serialize)]
 pub struct Task {
@@ -25,77 +24,66 @@ pub struct TaskUpdate {
     pub message: Option<String>,
 }
 
-impl TaskRepo {
-    pub fn new(conn: SqlitePool) -> Self {
-        TaskRepo(conn)
-    }
+mod task {
+    use super::*;
 
-    pub async fn create(&self, task: &Task) -> anyhow::Result<()> {
+    pub async fn create(ctx: &Context, task: &Task) -> anyhow::Result<()> {
         sqlx::query!(
             "INSERT INTO tasks VALUES (?, ?, ?)",
             task.id,
             task.status,
             task.message,
         )
-        .execute(&self.0)
+        .execute(&ctx.db)
         .await
         .and(Ok(()))
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn query(&self, id: &str) -> anyhow::Result<Option<Task>> {
+    pub async fn query(ctx: &Context, id: &str) -> anyhow::Result<Option<Task>> {
         sqlx::query_as!(
             Task,
             r#"SELECT id, status as "status: _", message FROM tasks WHERE id = ?"#,
             id,
         )
-        .fetch_optional(&self.0)
+        .fetch_optional(&ctx.db)
         .await
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn update(&self, id: &str, task: &TaskUpdate) -> anyhow::Result<()> {
+    pub async fn update(ctx: &Context, id: &str, task: &TaskUpdate) -> anyhow::Result<()> {
         sqlx::query!(
             "UPDATE tasks SET status = COALESCE(?, status), message = COALESCE(?, message) WHERE id = ?",
             task.status,
             task.message,
             id,
         )
-        .execute(&self.0)
+        .execute(&ctx.db)
         .await
         .and(Ok(()))
         .map_err(anyhow::Error::new)
     }
 }
 
-#[derive(Clone)]
-pub struct ConfigRepo(SqlitePool);
+mod config {
+    use super::*;
 
-impl ConfigRepo {
-    pub fn new(db: SqlitePool) -> Self {
-        Self(db)
-    }
-
-    pub async fn query(&self, key: &str) -> anyhow::Result<String> {
-        #[derive(Default)]
-        struct Row {
-            value: String,
-        }
-        sqlx::query_as!(Row, "SELECT value FROM configs WHERE key = ?", key)
-            .fetch_optional(&self.0)
+    pub async fn query(ctx: &Context, key: &str) -> anyhow::Result<String> {
+        sqlx::query_scalar!("SELECT value FROM configs WHERE key = ?", key)
+            .fetch_optional(&ctx.db)
             .await
-            .map(|x| x.unwrap_or_default().value)
+            .map(|x| x.unwrap_or_default())
             .map_err(anyhow::Error::new)
     }
 
-    pub async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+    pub async fn set(ctx: &Context, key: &str, value: &str) -> anyhow::Result<()> {
         sqlx::query!(
             "INSERT INTO configs VALUES (?, ?) ON CONFLICT DO UPDATE SET value = ?",
             key,
             value,
             value
         )
-        .execute(&self.0)
+        .execute(&ctx.db)
         .await
         .and(Ok(()))
         .map_err(anyhow::Error::new)
