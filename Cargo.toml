@@ -6,21 +6,23 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+bytes = "1"
 dotenvy = "0.15"
+futures = "0.3"
 http = "1"
 opendal = { version = "0.59", features = ["services-fs"] }
 percent-encoding = "2"
 rand = "0.10"
 reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
-scraper = "0.25"
+scraper = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.7", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
 uuid = { version = "1", features = ["v7"] }
-zip = "8"
+zip = "9"
