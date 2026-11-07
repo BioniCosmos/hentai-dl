@@ -36,7 +36,7 @@ async fn create_task(
     State(ctx): State<Context>,
     Json(params): Json<TaskCreationParams>,
 ) -> impl IntoResponse {
-    download_svc::create_task(&ctx, &params, false)
+    download_svc::create_task(&ctx, &params, None)
         .await
         .map(Json)
         .map_err(AppError)

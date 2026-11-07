@@ -1,18 +1,11 @@
-use std::{
-    collections::HashMap,
-    io::{self, ErrorKind, Read as _, Write as _},
-    sync::LazyLock,
-};
+use std::io::{self, ErrorKind, Read as _, Write as _};
 
 use anyhow::{Context as _, Result, anyhow};
 use http::header;
 use rand::distr::{Alphanumeric, SampleString as _};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{
-        RwLock,
-        oneshot::{self, Receiver},
-    },
+    sync::oneshot::{self, Sender},
     task::JoinSet,
     try_join,
 };
@@ -43,9 +36,6 @@ pub struct TaskCreationResult {
 
 type TaskQueryResult = Task;
 
-type Tasks = LazyLock<RwLock<HashMap<String, Receiver<(&'static str, String)>>>>;
-static TASKS: Tasks = LazyLock::new(Default::default);
-
 pub mod download {
     use super::*;
 
@@ -53,7 +43,7 @@ pub mod download {
     pub async fn create_task(
         ctx: &Context,
         params: &TaskCreationParams,
-        signal: bool,
+        tx: Option<Sender<(&'static str, String)>>,
     ) -> Result<TaskCreationResult> {
         let id = Uuid::now_v7().to_string();
         task_repo::create(
@@ -70,13 +60,6 @@ pub mod download {
             let id = id.clone();
             let params = params.clone();
             let ctx = ctx.clone();
-            let tx = if signal {
-                let (tx, rx) = oneshot::channel();
-                TASKS.write().await.insert(id.clone(), rx);
-                Some(tx)
-            } else {
-                None
-            };
 
             tokio::spawn(async move {
                 let result = run_task(&ctx, &id, params).await;
@@ -254,10 +237,7 @@ pub mod bot {
             match self {
                 Unauthenticated => write!(f, "Unauthorized request. The secret token is invalid."),
                 InvalidPayload => write!(f, "invalid payload"),
-                NoSignal => write!(
-                    f,
-                    "The corresponding task signal receiver cannot be found or the sender has been dropped."
-                ),
+                NoSignal => write!(f, "The corresponding task signal sender has been dropped."),
                 Internal => write!(f, "internal server error"),
             }
         }
@@ -281,7 +261,6 @@ pub mod bot {
     // TODO: task status string -> enum
     // TODO: store file real name into db
     // TODO: log all error on the webhook route
-    // TODO: remove TASKS
     #[instrument(err(Debug), skip(ctx))]
     pub async fn reply(ctx: Context, update: Update, secret: &str) -> Result<()> {
         if secret != config_repo::query(&ctx, "secret").await? {
@@ -301,17 +280,17 @@ pub mod bot {
                     let message = message
                         .text
                         .context("empty message (or unsupported message type)")?;
+                    let (tx, rx) = oneshot::channel();
 
                     let TaskCreationResult { id } = download_svc::create_task(
                         &ctx,
                         &TaskCreationParams::Url { url: message },
-                        true,
+                        Some(tx),
                     )
                     .await
                     .context(Error::Internal)?;
                     s.record("task_id", &id);
 
-                    let rx = TASKS.write().await.remove(&id).ok_or(Error::NoSignal)?;
                     let (status, message) = rx.await.context(Error::NoSignal)?;
                     match status {
                         "done" => {
