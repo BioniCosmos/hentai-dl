@@ -10,7 +10,7 @@ pub struct Task {
     pub message: String,
 }
 
-#[derive(Serialize, Type)]
+#[derive(Copy, Clone, Serialize, Type)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -20,7 +20,7 @@ pub enum TaskStatus {
 }
 
 pub struct TaskUpdate {
-    pub status: Option<&'static str>,
+    pub status: Option<TaskStatus>,
     pub message: Option<String>,
 }
 

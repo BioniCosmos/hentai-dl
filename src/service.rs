@@ -39,11 +39,11 @@ type TaskQueryResult = Task;
 pub mod download {
     use super::*;
 
-    #[instrument(err(Debug), skip(ctx))]
+    #[instrument(err(Debug), skip_all, fields(params))]
     pub async fn create_task(
         ctx: &Context,
         params: &TaskCreationParams,
-        tx: Option<Sender<(&'static str, String)>>,
+        tx: Option<Sender<(TaskStatus, String)>>,
     ) -> Result<TaskCreationResult> {
         let id = Uuid::now_v7().to_string();
         task_repo::create(
@@ -64,10 +64,10 @@ pub mod download {
             tokio::spawn(async move {
                 let result = run_task(&ctx, &id, params).await;
                 let (status, message) = match result {
-                    Ok(file_name) => ("done", file_name),
+                    Ok(file_name) => (TaskStatus::Done, file_name),
                     Err(error) => {
                         error!(task_id = id, ?error, "task failed");
-                        ("error", format!("{error:#}"))
+                        (TaskStatus::Error, format!("{error:#}"))
                     }
                 };
 
@@ -81,21 +81,16 @@ pub mod download {
                 )
                 .await
                 {
-                    warn!(
+                    error!(
                         task_id = id,
                         ?error,
-                        task_status = status,
-                        task_message = message,
                         "failed to update task status in database",
                     );
                 }
                 if let Some(tx) = tx
-                    && let Err((task_status, task_message)) = tx.send((status, message))
+                    && let Err(_) = tx.send((status, message))
                 {
-                    warn!(
-                        task_id = id,
-                        task_status, task_message, "failed to send task status signal",
-                    );
+                    error!(task_id = id, "failed to send task status signal");
                 }
             });
         }
@@ -258,7 +253,6 @@ pub mod bot {
         config_repo::set(ctx, "secret", &secret).await
     }
 
-    // TODO: task status string -> enum
     // TODO: store file real name into db
     // TODO: log all error on the webhook route
     #[instrument(err(Debug), skip(ctx))]
@@ -293,7 +287,7 @@ pub mod bot {
 
                     let (status, message) = rx.await.context(Error::NoSignal)?;
                     match status {
-                        "done" => {
+                        TaskStatus::Done => {
                             let path = format!(
                                 "{}.{}",
                                 id,
@@ -331,7 +325,7 @@ pub mod bot {
                             )
                             .context(Error::Internal)?;
                         }
-                        "error" => return Err(anyhow!(message)),
+                        TaskStatus::Error => return Err(anyhow!(message)),
                         _ => unreachable!(),
                     }
                     Ok(())
