@@ -9,7 +9,7 @@ use tokio::{
     task::JoinSet,
     try_join,
 };
-use tracing::{Instrument, error, field::Empty, info_span, instrument, warn};
+use tracing::{Instrument, Span, error, field::Empty, info_span, instrument, warn};
 use url::Url;
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
@@ -39,17 +39,19 @@ type TaskQueryResult = Task;
 pub mod download {
     use super::*;
 
-    #[instrument(err(Debug), skip_all, fields(params))]
+    #[instrument(err(Debug), skip_all, fields(params = ?params, task_id))]
     pub async fn create_task(
         ctx: &Context,
         params: &TaskCreationParams,
-        tx: Option<Sender<(TaskStatus, String)>>,
+        tx: Option<Sender<Task>>,
     ) -> Result<TaskCreationResult> {
         let id = Uuid::now_v7().to_string();
+        Span::current().record("task_id", &id);
         task_repo::create(
             ctx,
             &Task {
                 id: id.clone(),
+                file: String::new(),
                 status: TaskStatus::Pending,
                 message: String::new(),
             },
@@ -61,38 +63,38 @@ pub mod download {
             let params = params.clone();
             let ctx = ctx.clone();
 
-            tokio::spawn(async move {
-                let result = run_task(&ctx, &id, params).await;
-                let (status, message) = match result {
-                    Ok(file_name) => (TaskStatus::Done, file_name),
-                    Err(error) => {
-                        error!(task_id = id, ?error, "task failed");
-                        (TaskStatus::Error, format!("{error:#}"))
+            tokio::spawn(
+                async move {
+                    let task = run_task(&ctx, &id, params).await.unwrap_or_else(|error| {
+                        error!(?error, "task failed");
+                        Task {
+                            id,
+                            file: String::new(),
+                            status: TaskStatus::Error,
+                            message: format!("{error:#}"),
+                        }
+                    });
+                    if let Err(error) = task_repo::update(
+                        &ctx,
+                        &task.id,
+                        &TaskUpdate {
+                            file: Some(&task.file),
+                            status: Some(task.status),
+                            message: Some(&task.message),
+                        },
+                    )
+                    .await
+                    {
+                        error!(?error, "failed to update task status in database",);
                     }
-                };
-
-                if let Err(error) = task_repo::update(
-                    &ctx,
-                    &id,
-                    &TaskUpdate {
-                        status: Some(status),
-                        message: Some(message.clone()),
-                    },
-                )
-                .await
-                {
-                    error!(
-                        task_id = id,
-                        ?error,
-                        "failed to update task status in database",
-                    );
+                    if let Some(tx) = tx
+                        && let Err(_) = tx.send(task)
+                    {
+                        error!("failed to send task status signal");
+                    }
                 }
-                if let Some(tx) = tx
-                    && let Err(_) = tx.send((status, message))
-                {
-                    error!(task_id = id, "failed to send task status signal");
-                }
-            });
+                .in_current_span(),
+            );
         }
 
         Ok(TaskCreationResult { id })
@@ -102,26 +104,33 @@ pub mod download {
         task_repo::query(ctx, id).await
     }
 
-    async fn run_task(ctx: &Context, id: &str, params: TaskCreationParams) -> Result<String> {
+    async fn run_task(ctx: &Context, id: &str, params: TaskCreationParams) -> Result<Task> {
         let (url, raw) = match params {
             TaskCreationParams::Url { ref url } => (url, reqwest::get(url).await?.text().await?),
             TaskCreationParams::Raw { ref url, raw } => (url, raw),
         };
-        match ctx
+        let (file, title) = match ctx
             .parsers
             .get(Url::parse(url)?.host_str().context("invalid url")?)
             .context("unsupported origin")?
             .parse(&raw)?
         {
             ParseResult::Markdown { title, body } => {
-                ctx.store.write(&format!("{id}.md"), body).await?;
-                Ok(format!("{title}.md"))
+                let file = format!("{id}.md");
+                ctx.store.write(&file, body).await?;
+                (file, title + ".md")
             }
-            result @ ParseResult::Images { .. } => save_images(ctx, id, result).await,
-        }
+            result @ ParseResult::Images { .. } => save_images(ctx, id, result).await?,
+        };
+        Ok(Task {
+            id: id.to_owned(),
+            file,
+            status: TaskStatus::Done,
+            message: title,
+        })
     }
 
-    async fn save_images(ctx: &Context, id: &str, result: ParseResult) -> Result<String> {
+    async fn save_images(ctx: &Context, id: &str, result: ParseResult) -> Result<(String, String)> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
         };
@@ -154,7 +163,8 @@ pub mod download {
             .collect::<Result<Vec<_>>>()?;
         results.sort();
 
-        let mut writer = ctx.store.writer(&format!("{id}.zip")).await?;
+        let file = format!("{id}.zip");
+        let mut writer = ctx.store.writer(&file).await?;
         let (mut rx, tx) = io::pipe()?;
 
         let compress_task = async {
@@ -194,7 +204,7 @@ pub mod download {
         }
         writer.close().await?;
 
-        Ok(title + ".zip")
+        Ok((file, title + ".zip"))
     }
 }
 
@@ -253,8 +263,6 @@ pub mod bot {
         config_repo::set(ctx, "secret", &secret).await
     }
 
-    // TODO: store file real name into db
-    // TODO: log all error on the webhook route
     #[instrument(err(Debug), skip(ctx))]
     pub async fn reply(ctx: Context, update: Update, secret: &str) -> Result<()> {
         if secret != config_repo::query(&ctx, "secret").await? {
@@ -285,26 +293,18 @@ pub mod bot {
                     .context(Error::Internal)?;
                     s.record("task_id", &id);
 
-                    let (status, message) = rx.await.context(Error::NoSignal)?;
-                    match status {
+                    let task = rx.await.context(Error::NoSignal)?;
+                    match task.status {
                         TaskStatus::Done => {
-                            let path = format!(
-                                "{}.{}",
-                                id,
-                                std::path::Path::new(&message)
-                                    .extension()
-                                    .expect("unexpected invalid file name")
-                                    .display()
-                            );
                             let meta = ctx
                                 .store
-                                .stat(&path)
+                                .stat(&task.file)
                                 .await
                                 .context("failed to read file metadata")
                                 .context(Error::Internal)?;
                             let stream = ctx
                                 .store
-                                .reader(&path)
+                                .reader(&task.file)
                                 .await
                                 .context("failed to get file reader")
                                 .context(Error::Internal)?
@@ -316,7 +316,7 @@ pub mod bot {
                                 api::send_document(
                                     &ctx,
                                     chat_id,
-                                    &message,
+                                    &task.message,
                                     meta.content_length(),
                                     stream
                                 )
@@ -325,7 +325,7 @@ pub mod bot {
                             )
                             .context(Error::Internal)?;
                         }
-                        TaskStatus::Error => return Err(anyhow!(message)),
+                        TaskStatus::Error => return Err(anyhow!(task.message)),
                         _ => unreachable!(),
                     }
                     Ok(())

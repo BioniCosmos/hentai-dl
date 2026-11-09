@@ -3,9 +3,10 @@ use sqlx::prelude::Type;
 
 use crate::Context;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Task {
     pub id: String,
+    pub file: String,
     pub status: TaskStatus,
     pub message: String,
 }
@@ -19,9 +20,10 @@ pub enum TaskStatus {
     Error,
 }
 
-pub struct TaskUpdate {
+pub struct TaskUpdate<'a> {
+    pub file: Option<&'a str>,
     pub status: Option<TaskStatus>,
-    pub message: Option<String>,
+    pub message: Option<&'a str>,
 }
 
 pub mod task {
@@ -29,8 +31,9 @@ pub mod task {
 
     pub async fn create(ctx: &Context, task: &Task) -> anyhow::Result<()> {
         sqlx::query!(
-            "INSERT INTO tasks VALUES (?, ?, ?)",
+            "INSERT INTO tasks VALUES (?, ?, ?, ?)",
             task.id,
+            task.file,
             task.status,
             task.message,
         )
@@ -43,7 +46,7 @@ pub mod task {
     pub async fn query(ctx: &Context, id: &str) -> anyhow::Result<Option<Task>> {
         sqlx::query_as!(
             Task,
-            r#"SELECT id, status as "status: _", message FROM tasks WHERE id = ?"#,
+            r#"SELECT id, file, status as "status: _", message FROM tasks WHERE id = ?"#,
             id,
         )
         .fetch_optional(&ctx.db)
@@ -51,9 +54,14 @@ pub mod task {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn update(ctx: &Context, id: &str, task: &TaskUpdate) -> anyhow::Result<()> {
+    pub async fn update(ctx: &Context, id: &str, task: &TaskUpdate<'_>) -> anyhow::Result<()> {
         sqlx::query!(
-            "UPDATE tasks SET status = COALESCE(?, status), message = COALESCE(?, message) WHERE id = ?",
+            "UPDATE tasks SET
+                file = COALESCE(?, file),
+                status = COALESCE(?, status),
+                message = COALESCE(?, message)
+            WHERE id = ?",
+            task.file,
             task.status,
             task.message,
             id,

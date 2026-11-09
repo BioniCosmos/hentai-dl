@@ -1,5 +1,3 @@
-use std::path;
-
 use axum::{
     Json, Router,
     extract::{self, Request, State},
@@ -73,16 +71,7 @@ async fn download_file(
         Err(e) => return AppError(e).into_response(),
     };
 
-    *req.uri_mut() = format!(
-        "{}.{}",
-        &req.uri().path()["/api/download/file".len()..],
-        path::Path::new(&task.message)
-            .extension()
-            .expect("unexpected invalid file name")
-            .display()
-    )
-    .parse()
-    .expect("unexpected invalid path");
+    *req.uri_mut() = task.file.parse().expect("unexpected invalid path");
 
     let srv = ServeDir::new(".");
     let res = srv.oneshot(req).await.unwrap();
