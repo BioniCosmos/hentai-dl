@@ -2,6 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use tar::{Builder, EntryType, Header};
+use zip::{DateTime, ZipWriter, write::SimpleFileOptions};
 
 pub(crate) fn media_type_to_ext(media_type: &str) -> Option<&str> {
     const M: &[(&str, &str)] = &[
@@ -133,5 +134,18 @@ pub(crate) fn tar(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) 
     }
 
     builder.finish()?;
+    Ok(())
+}
+
+pub(crate) fn zip(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) -> Result<()> {
+    let mut writer = ZipWriter::new_stream(writer);
+    let options = SimpleFileOptions::default();
+    let options = options.last_modified_time(DateTime::DEFAULT);
+    writer.add_directory(format!("{dir}/"), options)?;
+    for (name, data) in files {
+        writer.start_file(format!("{dir}/{name}"), options)?;
+        writer.write_all(&data)?;
+    }
+    writer.finish()?;
     Ok(())
 }
