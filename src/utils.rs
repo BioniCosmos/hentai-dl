@@ -18,7 +18,7 @@ pub(crate) fn media_type_to_ext(media_type: &str) -> Option<&str> {
         .map(|(_, ext)| *ext)
 }
 
-pub(crate) fn tar(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) -> Result<()> {
+pub(crate) fn tar(writer: impl Write, files: Vec<(String, Box<[u8]>)>, dir: String) -> Result<()> {
     struct Path {
         name: String,
         prefix: Option<String>,
@@ -99,7 +99,7 @@ pub(crate) fn tar(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) 
 
     let mut builder = Builder::new(writer);
 
-    let dir = truncate_dir(dir);
+    let dir = truncate_dir(&dir);
     let mut header = Header::new_ustar();
     header.as_old_mut().name[..dir.name.len()].copy_from_slice(dir.name.as_bytes());
     if let Some(path) = &dir.path {
@@ -114,7 +114,7 @@ pub(crate) fn tar(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) 
     builder.append(&header, &[][..])?;
 
     for (name, data) in files {
-        let file = truncate_file(name, &dir);
+        let file = truncate_file(&name, &dir);
         let mut header = Header::new_ustar();
         header.as_old_mut().name[..file.name.len()].copy_from_slice(file.name.as_bytes());
         if let Some(prefix) = file.prefix {
@@ -137,11 +137,9 @@ pub(crate) fn tar(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) 
     Ok(())
 }
 
-pub(crate) fn zip(writer: impl Write, files: &[(String, Box<[u8]>)], dir: &str) -> Result<()> {
+pub(crate) fn zip(writer: impl Write, files: Vec<(String, Box<[u8]>)>, dir: String) -> Result<()> {
     let mut writer = ZipWriter::new_stream(writer);
-    let options = SimpleFileOptions::default();
-    let options = options.last_modified_time(DateTime::DEFAULT);
-    writer.add_directory(format!("{dir}/"), options)?;
+    let options = SimpleFileOptions::default().last_modified_time(DateTime::DEFAULT);
     for (name, data) in files {
         writer.start_file(format!("{dir}/{name}"), options)?;
         writer.write_all(&data)?;

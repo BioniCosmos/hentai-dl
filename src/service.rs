@@ -1,4 +1,4 @@
-use std::io::{self, ErrorKind, Read as _, Write as _};
+use std::io::{self, ErrorKind, Read as _};
 
 use anyhow::{Context as _, Result, anyhow};
 use http::header;
@@ -12,7 +12,6 @@ use tokio::{
 use tracing::{Instrument, Span, error, field::Empty, info_span, instrument, warn};
 use url::Url;
 use uuid::Uuid;
-use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     Context,
@@ -25,8 +24,22 @@ use crate::{
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "paramType", rename_all = "camelCase")]
 pub enum TaskCreationParams {
-    Url { url: String },
-    Raw { url: String, raw: String },
+    Url {
+        url: String,
+        archive_format: Option<ArchiveFormat>,
+    },
+    Raw {
+        url: String,
+        raw: String,
+        archive_format: Option<ArchiveFormat>,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Default, Deserialize)]
+pub enum ArchiveFormat {
+    #[default]
+    Tar,
+    Zip,
 }
 
 #[derive(Serialize)]
@@ -105,9 +118,20 @@ pub mod download {
     }
 
     async fn run_task(ctx: &Context, id: &str, params: TaskCreationParams) -> Result<Task> {
-        let (url, raw) = match params {
-            TaskCreationParams::Url { ref url } => (url, reqwest::get(url).await?.text().await?),
-            TaskCreationParams::Raw { ref url, raw } => (url, raw),
+        let (url, raw, archive_format) = match params {
+            TaskCreationParams::Url {
+                ref url,
+                archive_format,
+            } => (
+                url,
+                reqwest::get(url).await?.text().await?,
+                archive_format.unwrap_or_default(),
+            ),
+            TaskCreationParams::Raw {
+                ref url,
+                raw,
+                archive_format,
+            } => (url, raw, archive_format.unwrap_or_default()),
         };
         let (file, title) = match ctx
             .parsers
@@ -120,7 +144,9 @@ pub mod download {
                 ctx.store.write(&file, body).await?;
                 (file, title + ".md")
             }
-            result @ ParseResult::Images { .. } => save_images(ctx, id, result).await?,
+            result @ ParseResult::Images { .. } => {
+                save_images(ctx, id, result, archive_format).await?
+            }
         };
         Ok(Task {
             id: id.to_owned(),
@@ -130,9 +156,18 @@ pub mod download {
         })
     }
 
-    async fn save_images(ctx: &Context, id: &str, result: ParseResult) -> Result<(String, String)> {
+    async fn save_images(
+        ctx: &Context,
+        id: &str,
+        result: ParseResult,
+        archive_format: ArchiveFormat,
+    ) -> Result<(String, String)> {
         let ParseResult::Images { title, urls } = result else {
             return Err(anyhow!("wrong param: expecting `ParseResult::Images`"));
+        };
+        let (archive, ext): (fn(_, _, _) -> _, _) = match archive_format {
+            ArchiveFormat::Tar => (utils::tar, ".tar"),
+            ArchiveFormat::Zip => (utils::zip, ".zip"),
         };
 
         let width = (urls.len().checked_ilog10().unwrap_or_default() + 1) as usize;
@@ -151,7 +186,7 @@ pub mod download {
                         utils::media_type_to_ext(content_type)
                             .context(format!("unsupported `Content-Type`: {content_type}"))?
                     ),
-                    response.bytes().await?,
+                    response.bytes().await?.to_vec().into_boxed_slice(),
                 ))
             });
         }
@@ -163,23 +198,13 @@ pub mod download {
             .collect::<Result<Vec<_>>>()?;
         results.sort();
 
-        let file = format!("{id}.zip");
+        let file = format!("{id}{ext}");
         let mut writer = ctx.store.writer(&file).await?;
         let (mut rx, tx) = io::pipe()?;
 
         let compress_task = async {
-            let title_clone = title.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut writer = ZipWriter::new_stream(tx);
-                let options = SimpleFileOptions::default();
-                for (name, res) in results {
-                    writer.start_file(format!("{title_clone}/{name}"), options)?;
-                    writer.write_all(&res)?;
-                }
-                writer.finish()
-            })
-            .await??;
-            anyhow::Ok(())
+            let title = title.clone();
+            tokio::task::spawn_blocking(move || archive(tx, results, title)).await?
         };
 
         let save_task = async {
@@ -204,7 +229,7 @@ pub mod download {
         }
         writer.close().await?;
 
-        Ok((file, title + ".zip"))
+        Ok((file, title + ext))
     }
 }
 
@@ -286,7 +311,10 @@ pub mod bot {
 
                     let TaskCreationResult { id } = download_svc::create_task(
                         &ctx,
-                        &TaskCreationParams::Url { url: message },
+                        &TaskCreationParams::Url {
+                            url: message,
+                            archive_format: None,
+                        },
                         Some(tx),
                     )
                     .await
