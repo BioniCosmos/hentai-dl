@@ -23,7 +23,11 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "paramType", rename_all = "camelCase")]
+#[serde(
+    tag = "paramType",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TaskCreationParams {
     Url {
         url: String,
@@ -37,6 +41,7 @@ pub enum TaskCreationParams {
 }
 
 #[derive(Copy, Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ArchiveFormat {
     #[default]
     Tar,
