@@ -125,7 +125,7 @@ pub mod download {
                 archive_format,
             } => (
                 url,
-                reqwest::get(url).await?.text().await?,
+                ctx.http.get(url).send().await?.text().await?,
                 archive_format.unwrap_or_default(),
             ),
             TaskCreationParams::Raw {
@@ -174,8 +174,9 @@ pub mod download {
         let width = (urls.len().checked_ilog10().unwrap_or_default() + 1) as usize;
         let mut tasks = JoinSet::new();
         for (i, url) in urls.into_iter().enumerate() {
+            let http = ctx.http.clone();
             tasks.spawn(async move {
-                let response = reqwest::get(&url).await?;
+                let response = http.get(&url).send().await?;
                 let content_type = response
                     .headers()
                     .get(header::CONTENT_TYPE)

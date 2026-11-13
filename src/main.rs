@@ -27,7 +27,10 @@ async fn main() {
         db: SqlitePool::connect(&database_url)
             .await
             .expect("failed to connect to database"),
-        http: Client::new(),
+        http: Client::builder()
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36")
+            .build()
+            .expect("failed to initialize the HTTP client"),
         store: init_operator(&storage_url),
         config: Arc::new(Config {
             bot_api: api::init(&bot_token),
