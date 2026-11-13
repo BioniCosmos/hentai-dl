@@ -1,7 +1,8 @@
-use std::io::Write;
+use std::io::{Error, ErrorKind, Write};
 
 use anyhow::Result;
 use tar::{Builder, EntryType, Header};
+use tokio::sync::mpsc::UnboundedSender;
 use zip::{DateTime, ZipWriter, write::SimpleFileOptions};
 
 pub(crate) fn media_type_to_ext(media_type: &str) -> Option<&str> {
@@ -146,4 +147,19 @@ pub(crate) fn zip(writer: impl Write, files: Vec<(String, Box<[u8]>)>, dir: Stri
     }
     writer.finish()?;
     Ok(())
+}
+
+pub(crate) struct ChannelWriter(pub UnboundedSender<Box<[u8]>>);
+
+impl Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .send(Box::from(buf))
+            .map(|_| buf.len())
+            .map_err(|_| Error::from(ErrorKind::BrokenPipe))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

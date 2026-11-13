@@ -1,12 +1,13 @@
-use std::io::{self, ErrorKind, Read as _};
-
 use anyhow::{Context as _, Result, anyhow};
 use http::header;
 use rand::distr::{Alphanumeric, SampleString as _};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::oneshot::{self, Sender},
-    task::JoinSet,
+    sync::{
+        mpsc,
+        oneshot::{self, Sender},
+    },
+    task::{self, JoinSet},
     try_join,
 };
 use tracing::{Instrument, Span, error, field::Empty, info_span, instrument, warn};
@@ -18,7 +19,7 @@ use crate::{
     api::{self, Update},
     parser::ParseResult,
     repo::{Task, TaskStatus, TaskUpdate, config as config_repo, task as task_repo},
-    utils,
+    utils::{self, ChannelWriter},
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -200,25 +201,15 @@ pub mod download {
 
         let file = format!("{id}{ext}");
         let mut writer = ctx.store.writer(&file).await?;
-        let (mut rx, tx) = io::pipe()?;
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
         let compress_task = async {
             let title = title.clone();
-            tokio::task::spawn_blocking(move || archive(tx, results, title)).await?
+            task::spawn_blocking(move || archive(ChannelWriter(tx), results, title)).await?
         };
-
         let save_task = async {
-            loop {
-                let mut buf = vec![0u8; 1024 * 64];
-                match rx.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buf.truncate(n);
-                        writer.write(buf).await?
-                    }
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(anyhow::Error::new(e)),
-                }
+            while let Some(x) = rx.recv().await {
+                writer.write(x.into_vec()).await?
             }
             Ok(())
         };
